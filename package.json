@@ -1,0 +1,66 @@
+{
+  "name": "claudedesk",
+  "productName": "ClaudeDesk",
+  "description": "ClaudeDesk — desktop sessions for Claude Code",
+  "private": true,
+  "version": "0.1.0",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "node scripts/patch-electron-app-name.mjs && vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "postinstall": "electron-rebuild -f -w better-sqlite3,node-pty && node scripts/patch-electron-app-name.mjs",
+    "patch:electron": "node scripts/patch-electron-app-name.mjs"
+  },
+  "build": {
+    "appId": "com.claudedesk.app",
+    "productName": "ClaudeDesk",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "icon": "build/icon.png"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.209",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/addon-web-links": "0.12.0",
+    "@xterm/xterm": "6.0.0",
+    "better-sqlite3": "12.11.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.24.0",
+    "node-pty": "1.1.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tailwind-merge": "3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.2",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "autoprefixer": "10.5.3",
+    "electron": "43.1.1",
+    "electron-builder": "26.15.3",
+    "oxlint": "^1.71.0",
+    "postcss": "8.5.19",
+    "tailwindcss": "4.3.2",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "vite-plugin-electron": "1.1.0",
+    "vite-plugin-electron-renderer": "1.0.0"
+  }
+}
