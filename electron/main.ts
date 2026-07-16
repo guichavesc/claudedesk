@@ -10,6 +10,8 @@ import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { randomUUID } from 'crypto';
 import * as profileConfig from './profileConfig.js';
+import { augmentShellEnv, resolveClaudeBinary } from './claudeCli.js';
+import { readSessionTokenUsage } from './sessionUsage.js';
 
 // Pin the product name + userData folder before app ready. Renaming package.json
 // previously moved Electron's data dir (agent-app -> ClaudeDesk) and looked like
@@ -211,7 +213,7 @@ function getPty() {
 }
 
 function buildClaudeEnv(profile: any): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: '1' };
+  const env: NodeJS.ProcessEnv = augmentShellEnv({ ...process.env, FORCE_COLOR: '1' });
 
   // Every profile gets its own CLAUDE_CONFIG_DIR — not just subscription ones — so
   // that MCP servers and plugins configured per-profile stay isolated regardless of
@@ -235,7 +237,7 @@ function buildClaudeEnv(profile: any): NodeJS.ProcessEnv {
 // before session-id binding existed, --continue picks up the latest chat in the
 // workspace as a best-effort fallback.
 function buildClaudeArgs(session: any, opts: { resume: boolean; continueRecent: boolean }): string[] {
-  const args = ['claude', '--model', session.model];
+  const args = ['--model', session.model];
 
   if (opts.resume) {
     args.push('--resume', session.id);
@@ -261,9 +263,9 @@ function buildClaudeArgs(session: any, opts: { resume: boolean; continueRecent: 
 // Used for generating session summaries.
 function runClaudePrint(prompt: string, model: string, cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['claude', '-p', '--model', model, '--tools', '', '--no-session-persistence'], {
+    const child = spawn(resolveClaudeBinary(), ['-p', '--model', model, '--tools', '', '--no-session-persistence'], {
       cwd,
-      env,
+      env: augmentShellEnv(env),
     });
 
     let stdout = '';
@@ -324,10 +326,18 @@ function spawnClaudePty(sessionId: string, cols = 80, rows = 30): { success: boo
     continueRecent: hasPriorTranscript && !canResumeById,
   });
 
-  console.log('[PTY] Spawning claude for session', sessionId, '| args:', args, '| cwd:', session.workspace_path);
-
   const pty = getPty();
-  const ptyProcess = pty.spawn('npx', args, {
+  let claudeBinary: string;
+  try {
+    claudeBinary = resolveClaudeBinary();
+  } catch (e: any) {
+    console.error('[PTY] Failed to resolve Claude binary:', e);
+    return { success: false, message: e?.message || 'Claude CLI not found in app bundle' };
+  }
+
+  console.log('[PTY] Spawning claude for session', sessionId, '| binary:', claudeBinary, '| args:', args, '| cwd:', session.workspace_path);
+
+  const ptyProcess = pty.spawn(claudeBinary, args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -346,8 +356,22 @@ function spawnClaudePty(sessionId: string, cols = 80, rows = 30): { success: boo
     safeSend('pty-output', sessionId, data);
   });
 
-  ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
-    console.log('[PTY] Session', sessionId, 'process exited with code', exitCode);
+  const spawnedAt = Date.now();
+  ptyProcess.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+    console.log('[PTY] Session', sessionId, 'process exited with code', exitCode, 'signal', signal);
+    // A near-immediate exit means Claude never really started (bad binary, missing
+    // auth, killed by the OS, etc.) — surface it in the transcript itself so this is
+    // visible without opening DevTools, instead of just flipping the status dot red.
+    if (Date.now() - spawnedAt < 4000) {
+      const reason = signal ? `killed by signal ${signal}` : `exit code ${exitCode}`;
+      const active = activeCliSessions[sessionId];
+      const tail = (active?.buffer || '').split('\n').slice(-6).join('\n').trim();
+      const note =
+        `\r\n\x1b[31m--- Claude process exited almost immediately (${reason}) ---\x1b[0m\r\n` +
+        (tail ? `\x1b[2m${tail}\x1b[0m\r\n` : '\x1b[2m(no output was produced before it exited)\x1b[0m\r\n');
+      safeSend('pty-output', sessionId, note);
+      if (active) active.buffer += note;
+    }
     persistBuffer(sessionId);
     if (activeCliSessions[sessionId]) {
       clearInterval(activeCliSessions[sessionId].saveTimer);
@@ -395,14 +419,21 @@ function resolveAppIcon(): string {
   // Runtime dock/window icons need a format NativeImage can decode. Electron's
   // dock.setIcon() often fails on .icns in unpackaged/dev builds, so prefer PNG
   // here and leave .icns for electron-builder packaging only.
-  const root = path.join(__dirname, '..');
-  const candidates = [
-    path.join(root, 'build', 'icon-512.png'),
-    path.join(root, 'build', 'icon.png'),
-    path.join(root, 'build', 'icon-dock.png'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+  const roots = [
+    path.join(__dirname, '..'),
+    process.resourcesPath || '',
+    path.join(process.resourcesPath || '', 'app.asar.unpacked'),
+  ].filter(Boolean);
+
+  const names = ['icon-512.png', 'icon.png', 'icon-dock.png'];
+  for (const root of roots) {
+    for (const name of names) {
+      const candidate = path.join(root, 'build', name);
+      if (fs.existsSync(candidate)) return candidate;
+      // Packaged: icons may live directly under Resources via extraResources
+      const alt = path.join(root, name);
+      if (fs.existsSync(alt)) return alt;
+    }
   }
   return '';
 }
@@ -441,7 +472,8 @@ function createWindow() {
 app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock) {
     try {
-      app.dock.setIcon(resolveAppIcon());
+      const icon = resolveAppIcon();
+      if (icon) app.dock.setIcon(icon);
     } catch (e) {
       console.warn('[App] Could not set dock icon:', e);
     }
@@ -780,11 +812,18 @@ function setupIpcHandlers() {
   ipcMain.handle('sendCliInput', (_event, sessionId, data) => {
     const active = activeCliSessions[sessionId];
     if (!active?.pty) {
-      console.error('[PTY Input] No active PTY for session:', sessionId);
       return false;
     }
-    active.pty.write(data);
-    return true;
+    try {
+      active.pty.write(data);
+      return true;
+    } catch (e: any) {
+      // EIO is expected once the child has exited — don't spam the console.
+      if (e?.code !== 'EIO') {
+        console.error('[PTY Input] Write failed for session', sessionId, e);
+      }
+      return false;
+    }
   });
 
   ipcMain.handle('resizeCliSession', (_event, sessionId, cols, rows) => {
@@ -808,6 +847,16 @@ function setupIpcHandlers() {
     const db = getDb();
     const row: any = db.prepare('SELECT buffer FROM terminal_snapshots WHERE session_id = ?').get(sessionId);
     return row ? row.buffer : null;
+  });
+
+  ipcMain.handle('getSessionTokenUsage', (_event, sessionId) => {
+    const db = getDb();
+    const session: any = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    if (!session) {
+      return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, totalTokens: 0, requestCount: 0, found: false };
+    }
+    const profile: any = db.prepare('SELECT * FROM profiles WHERE id = ?').get(session.profile_id);
+    return readSessionTokenUsage(profile?.claude_config_dir, session.workspace_path, sessionId);
   });
 
   ipcMain.handle('getGitDiff', async (_event, workspacePath) => {
@@ -1085,8 +1134,8 @@ function setupIpcHandlers() {
         console.log('[Auth] Starting Claude authentication...');
         
         // Run claude and capture output
-        const child = spawn('npx', ['claude'], {
-          env,
+        const child = spawn(resolveClaudeBinary(), [], {
+          env: augmentShellEnv(env),
           cwd: homedir
         });
 

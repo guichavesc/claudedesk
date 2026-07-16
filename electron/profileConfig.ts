@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
+import { augmentShellEnv, resolveClaudeBinary } from './claudeCli.js';
 
 // Each profile already gets its own CLAUDE_CONFIG_DIR (see buildClaudeEnv in main.ts),
 // which is where Claude Code stores `.claude.json` (MCP servers) and `settings.json`
@@ -96,7 +97,15 @@ interface CliResult {
 // of reverse-engineering an internal cache format.
 function runClaudeCli(env: NodeJS.ProcessEnv, args: string[], timeoutMs = 60_000): Promise<CliResult> {
   return new Promise((resolve) => {
-    const child = spawn('npx', ['claude', ...args], { cwd: os.homedir(), env });
+    let binary: string;
+    try {
+      binary = resolveClaudeBinary();
+    } catch (e: any) {
+      resolve({ success: false, stdout: '', message: e?.message || 'Claude CLI not found' });
+      return;
+    }
+
+    const child = spawn(binary, args, { cwd: os.homedir(), env: augmentShellEnv(env) });
 
     let stdout = '';
     let stderr = '';

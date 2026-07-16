@@ -101,6 +101,26 @@ export function formatSessionStarted(startedAt: string): string {
   return `Session Started ${ordinal(day)} ${month} ${d.getFullYear()}`;
 }
 
+export interface SessionTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreateTokens: number;
+  totalTokens: number;
+  requestCount: number;
+  found: boolean;
+}
+
+/** Compact token counts for the status bar (e.g. 12.4k, 1.2M). */
+export function formatTokenCount(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 10_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  if (n < 10_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  return `${Math.round(n / 1_000_000)}M`;
+}
+
 export interface Message {
   id?: string;
   session_id: string;
@@ -152,6 +172,7 @@ declare global {
       sendCliInput: (sessionId: string, data: string) => Promise<boolean>;
       resizeCliSession: (sessionId: string, cols: number, rows: number) => Promise<boolean>;
       getTerminalSnapshot: (sessionId: string) => Promise<string | null>;
+      getSessionTokenUsage: (sessionId: string) => Promise<SessionTokenUsage>;
       onPtyOutput: (callback: (sessionId: string, data: string) => void) => () => void;
       onPtyExit: (callback: (sessionId: string, exitCode: number) => void) => () => void;
       onSessionTitleUpdated: (callback: (sessionId: string, title: string) => void) => () => void;

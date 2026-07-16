@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('api', {
   sendCliInput: (sessionId: string, data: string) => ipcRenderer.invoke('sendCliInput', sessionId, data),
   resizeCliSession: (sessionId: string, cols: number, rows: number) => ipcRenderer.invoke('resizeCliSession', sessionId, cols, rows),
   getTerminalSnapshot: (sessionId: string) => ipcRenderer.invoke('getTerminalSnapshot', sessionId),
+  getSessionTokenUsage: (sessionId: string) => ipcRenderer.invoke('getSessionTokenUsage', sessionId),
   onPtyOutput: (callback: (sessionId: string, data: string) => void) => {
     const listener = (_event: any, sessionId: string, data: string) => callback(sessionId, data);
     ipcRenderer.on('pty-output', listener);

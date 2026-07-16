@@ -1,5 +1,9 @@
 import React from 'react';
 import { Minus, Square, X } from 'lucide-react';
+// Imported (not a hardcoded "/favicon.svg" string) so Vite rewrites the URL correctly
+// under the packaged app's file:// protocol, where an absolute path resolves to the
+// filesystem root instead of the app bundle.
+import faviconUrl from '/favicon.svg?url';
 
 export function TitleBar() {
   const isMac = navigator.userAgent.includes('Mac');
@@ -12,7 +16,7 @@ export function TitleBar() {
       </div>
       
       <div className="font-ui text-[11px] uppercase tracking-wider text-[var(--color-text-dim)] font-semibold flex items-center gap-2">
-        <img src="/favicon.svg" alt="" width={14} height={14} className="rounded-[3px]" draggable={false} />
+        <img src={faviconUrl} alt="" width={14} height={14} className="rounded-[3px]" draggable={false} />
         ClaudeDesk
       </div>
 

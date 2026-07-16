@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Download, ChevronDown, RotateCcw, FileText, Loader2 } from 'lucide-react';
-import { Session, Profile, PermissionMode, PERMISSION_MODES } from '../types';
+import { Session, Profile, PermissionMode, PERMISSION_MODES, SessionTokenUsage, formatTokenCount } from '../types';
 import { TerminalView, TerminalViewHandle } from './TerminalView';
 import { SessionHeader } from './SessionHeader';
 
@@ -17,11 +17,13 @@ export function ChatArea({ session, profile, isGitPanelOpen, onToggleGitPanel }:
   const [isConnected, setIsConnected] = useState(true);
   const [isRestarting, setIsRestarting] = useState(false);
   const [isExportingSummary, setIsExportingSummary] = useState(false);
+  const [tokenUsage, setTokenUsage] = useState<SessionTokenUsage | null>(null);
   const termRef = useRef<TerminalViewHandle>(null);
 
   useEffect(() => {
     setPermissionMode(session.permission_mode || 'default');
     setIsConnected(true);
+    setTokenUsage(null);
 
     let pendingChunks: string[] = [];
     let backfilled = false;
@@ -68,6 +70,25 @@ export function ChatArea({ session, profile, isGitPanelOpen, onToggleGitPanel }:
     return () => {
       unsubscribeOutput();
       unsubscribeExit();
+    };
+  }, [session.id]);
+
+  // Poll Claude Code's JSONL transcript for token spend while this tab is open.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const usage = await window.api.getSessionTokenUsage(session.id);
+        if (!cancelled) setTokenUsage(usage);
+      } catch {
+        // ignore — transcript may not exist yet for brand-new sessions
+      }
+    };
+    refresh();
+    const interval = setInterval(refresh, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
     };
   }, [session.id]);
 
@@ -121,6 +142,17 @@ export function ChatArea({ session, profile, isGitPanelOpen, onToggleGitPanel }:
     }
   };
 
+  const hasTokens = !!tokenUsage?.found;
+  const tokenTitle = hasTokens
+    ? [
+        `Input: ${tokenUsage!.inputTokens.toLocaleString()}`,
+        `Output: ${tokenUsage!.outputTokens.toLocaleString()}`,
+        `Cache read: ${tokenUsage!.cacheReadTokens.toLocaleString()}`,
+        `Cache write: ${tokenUsage!.cacheCreateTokens.toLocaleString()}`,
+        `${tokenUsage!.requestCount} API request${tokenUsage!.requestCount === 1 ? '' : 's'}`,
+      ].join('\n')
+    : 'Token usage will appear once Claude responds';
+
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-[var(--color-bg-base)]">
       <SessionHeader
@@ -155,6 +187,24 @@ export function ChatArea({ session, profile, isGitPanelOpen, onToggleGitPanel }:
           )}
         </div>
         <div className="flex items-center gap-3">
+          <span
+            className={`tabular-nums tracking-wide ${
+              hasTokens ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-dim)]'
+            }`}
+            title={tokenTitle}
+          >
+            {hasTokens ? (
+              <>
+                <span className="opacity-70">TOKENS</span>
+                {' '}
+                ↑{formatTokenCount(tokenUsage!.inputTokens + tokenUsage!.cacheCreateTokens)}
+                {' · '}
+                ↓{formatTokenCount(tokenUsage!.outputTokens)}
+              </>
+            ) : (
+              <span className="opacity-50">TOKENS —</span>
+            )}
+          </span>
           <span>MODEL: {session.model}</span>
           <div className="relative">
             <button
