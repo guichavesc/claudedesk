@@ -3,7 +3,7 @@
   "productName": "ClaudeDesk",
   "description": "ClaudeDesk — desktop sessions for Claude Code",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "node scripts/patch-electron-app-name.mjs && vite",

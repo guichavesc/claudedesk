@@ -7,11 +7,11 @@ interface TabsBarProps {
   activeId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
-  onClose: (id: string) => void;
+  onArchive: (id: string) => void;
   onChangeColor: (id: string, color: string) => void;
 }
 
-export function TabsBar({ sessions, activeId, onSelect, onNew, onClose, onChangeColor }: TabsBarProps) {
+export function TabsBar({ sessions, activeId, onSelect, onNew, onArchive, onChangeColor }: TabsBarProps) {
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
 
@@ -33,9 +33,9 @@ export function TabsBar({ sessions, activeId, onSelect, onNew, onClose, onChange
     };
   }, [colorPickerFor]);
 
-  const handleClose = (e: React.MouseEvent, sessionId: string) => {
+  const handleArchive = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
-    onClose(sessionId);
+    onArchive(sessionId);
   };
 
   return (
@@ -83,9 +83,9 @@ export function TabsBar({ sessions, activeId, onSelect, onNew, onClose, onChange
             />
             <span className="truncate flex-1">{label}</span>
             <button
-              onClick={(e) => handleClose(e, session.id)}
+              onClick={(e) => handleArchive(e, session.id)}
               className="absolute right-1.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 hover:bg-[var(--color-bg-base)] rounded p-0.5 transition-all"
-              title="Close session"
+              title="Archive session"
             >
               <X size={12} className="text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)]" />
             </button>

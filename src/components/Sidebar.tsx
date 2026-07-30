@@ -1,53 +1,110 @@
-import React, { useState } from 'react';
-import { User, Terminal, Settings, Plus, Trash2 } from 'lucide-react';
-import { Profile, Session, sessionColor, sessionDisplayName } from '../types';
+import React, { useMemo, useState } from 'react';
+import {
+  User,
+  Terminal,
+  Settings,
+  Plus,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+  Archive,
+  RotateCcw,
+} from 'lucide-react';
+import { Profile, Session, isSessionActive, sessionColor, sessionDisplayName } from '../types';
 
 interface SidebarProps {
   profiles: Profile[];
   sessions: Session[];
   activeSessionId: string | null;
+  focusedProfileId: string | null;
   width: number;
   onSelectSession: (sessionId: string) => void;
+  onFocusProfile: (profileId: string) => void;
+  onClearProfileFocus: () => void;
+  onArchiveSession: (sessionId: string) => void;
+  onReopenSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => void;
   onReload: () => void;
   onNewProfile: () => void;
   onOpenSettings: () => void;
 }
 
-export function Sidebar({ profiles, sessions, activeSessionId, width, onSelectSession, onNewProfile, onReload, onOpenSettings }: SidebarProps) {
+export function Sidebar({
+  profiles,
+  sessions,
+  activeSessionId,
+  focusedProfileId,
+  width,
+  onSelectSession,
+  onFocusProfile,
+  onClearProfileFocus,
+  onArchiveSession,
+  onReopenSession,
+  onDeleteSession,
+  onNewProfile,
+  onReload,
+  onOpenSettings,
+}: SidebarProps) {
   const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
+  const [collapsedProfiles, setCollapsedProfiles] = useState<Record<string, boolean>>({});
+  const [expandedArchived, setExpandedArchived] = useState<Record<string, boolean>>({});
+
+  const sessionsByProfile = useMemo(() => {
+    const map = new Map<string, { active: Session[]; archived: Session[] }>();
+    for (const p of profiles) {
+      map.set(p.id, { active: [], archived: [] });
+    }
+    for (const s of sessions) {
+      let bucket = map.get(s.profile_id);
+      if (!bucket) {
+        bucket = { active: [], archived: [] };
+        map.set(s.profile_id, bucket);
+      }
+      if (isSessionActive(s)) bucket.active.push(s);
+      else bucket.archived.push(s);
+    }
+    return map;
+  }, [profiles, sessions]);
+
+  const visibleProfiles = focusedProfileId
+    ? profiles.filter(p => p.id === focusedProfileId)
+    : profiles;
+
+  const focusedProfile = focusedProfileId
+    ? profiles.find(p => p.id === focusedProfileId)
+    : null;
 
   const handleDeleteProfile = async (profileId: string, profileName: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    
-    console.log('[Delete Profile] Starting deletion for:', { profileId, profileName });
-    
+
     if (!confirm(`Are you sure you want to delete the profile "${profileName}"? This will remove all associated credentials and config files.`)) {
-      console.log('[Delete Profile] User cancelled deletion');
       return;
     }
 
-    console.log('[Delete Profile] User confirmed, proceeding with deletion');
     setDeletingProfileId(profileId);
-    
+
     try {
-      console.log('[Delete Profile] Calling API deleteProfile...');
       const result = await window.api.deleteProfile(profileId);
-      console.log('[Delete Profile] API response:', result);
-      
       if (result.success) {
-        console.log('[Delete Profile] Success! Reloading data...');
+        if (focusedProfileId === profileId) onClearProfileFocus();
         onReload();
       } else {
-        console.error('[Delete Profile] Failed:', result.message);
         alert(result.message || 'Failed to delete profile');
       }
-    } catch (error) {
-      console.error('[Delete Profile] Exception caught:', error);
+    } catch {
       alert('Error deleting profile');
     } finally {
       setDeletingProfileId(null);
-      console.log('[Delete Profile] Deletion process complete');
     }
+  };
+
+  const toggleProfileCollapsed = (profileId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCollapsedProfiles(prev => ({ ...prev, [profileId]: !prev[profileId] }));
+  };
+
+  const toggleArchivedExpanded = (profileId: string) => {
+    setExpandedArchived(prev => ({ ...prev, [profileId]: !prev[profileId] }));
   };
 
   return (
@@ -55,76 +112,187 @@ export function Sidebar({ profiles, sessions, activeSessionId, width, onSelectSe
       style={{ width }}
       className="bg-[var(--color-bg-surface)] border-r border-[var(--color-border-subtle)] flex flex-col shrink-0 min-w-0 overflow-hidden"
     >
-      
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-4 no-scrollbar">
-        {/* Profiles Section */}
-        <div className="mb-6">
-          <div className="px-4 mb-2 flex items-center justify-between group">
-            <span className="font-ui text-[11px] text-[var(--color-text-dim)] uppercase tracking-wider font-semibold">Profiles</span>
-            <button 
-              onClick={onNewProfile}
-              className="text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)] opacity-0 group-hover:opacity-100 transition-all"
-            >
-              <Plus size={14} />
-            </button>
-          </div>
-          
-          <div className="flex flex-col gap-0.5">
-            {profiles.map(p => (
-              <div key={p.id} className="px-4 py-1.5 flex items-center gap-2 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] cursor-pointer transition-colors text-[12px] group/item">
-                <User size={14} />
-                <span className="truncate flex-1">{p.name}</span>
-                <button
-                  onClick={(e) => handleDeleteProfile(p.id, p.name, e)}
-                  disabled={deletingProfileId === p.id}
-                  className="opacity-0 group-hover/item:opacity-100 hover:text-red-500 transition-all disabled:opacity-50"
-                  title="Delete profile"
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))}
-            {profiles.length === 0 && (
-              <div className="px-4 py-1.5 text-[11px] text-[var(--color-text-dim)]">No profiles created</div>
-            )}
-          </div>
+        <div className="px-4 mb-2 flex items-center justify-between group">
+          <span className="font-ui text-[11px] text-[var(--color-text-dim)] uppercase tracking-wider font-semibold">
+            Sessions
+          </span>
+          <button
+            onClick={onNewProfile}
+            className="text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)] opacity-0 group-hover:opacity-100 transition-all"
+            title="New profile"
+          >
+            <Plus size={14} />
+          </button>
         </div>
 
-        {/* Sessions Section */}
-        <div>
-          <div className="px-4 mb-2">
-            <span className="font-ui text-[11px] text-[var(--color-text-dim)] uppercase tracking-wider font-semibold">Sessions</span>
+        {focusedProfile && (
+          <div className="px-4 mb-3">
+            <button
+              type="button"
+              onClick={onClearProfileFocus}
+              className="text-[11px] text-[var(--color-accent)] hover:underline"
+            >
+              ← All profiles
+            </button>
+            <div className="mt-1 text-[12px] text-[var(--color-text-secondary)] truncate">
+              Focused: {focusedProfile.name}
+            </div>
           </div>
-          
-          <div className="flex flex-col gap-0.5">
-            {sessions.map(s => {
-              const isActive = s.id === activeSessionId;
-              const color = sessionColor(s);
-              return (
-                <button
-                  key={s.id}
-                  onClick={() => onSelectSession(s.id)}
-                  title={`${sessionDisplayName(s)}\n${s.workspace_path}`}
-                  className={`px-4 py-1.5 flex items-center gap-2 w-full text-left cursor-pointer transition-colors text-[12px] border-l-2 ${
-                    isActive
+        )}
+
+        <div className="flex flex-col gap-3">
+          {visibleProfiles.map(profile => {
+            const bucket = sessionsByProfile.get(profile.id) || { active: [], archived: [] };
+            const collapsed = !!collapsedProfiles[profile.id];
+            const archivedOpen = !!expandedArchived[profile.id];
+            const isFocused = focusedProfileId === profile.id;
+
+            return (
+              <div key={profile.id}>
+                <div
+                  className={`px-4 py-1.5 flex items-center gap-1.5 text-[12px] group/profile ${
+                    isFocused
                       ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]'
-                      : 'border-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                      : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
                   }`}
-                  style={isActive ? { borderLeftColor: color } : undefined}
                 >
-                  <span
-                    className="w-2 h-2 rounded-full shrink-0"
-                    style={{ backgroundColor: color, opacity: isActive ? 1 : 0.7 }}
-                  />
-                  <Terminal size={14} className="shrink-0" style={isActive ? { color } : undefined} />
-                  <span className="truncate">{sessionDisplayName(s)}</span>
-                </button>
-              );
-            })}
-            {sessions.length === 0 && (
-              <div className="px-4 py-1.5 text-[11px] text-[var(--color-text-dim)]">No sessions yet</div>
-            )}
-          </div>
+                  <button
+                    type="button"
+                    onClick={(e) => toggleProfileCollapsed(profile.id, e)}
+                    className="shrink-0 text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)]"
+                    title={collapsed ? 'Expand' : 'Collapse'}
+                  >
+                    {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onFocusProfile(profile.id)}
+                    className="flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer"
+                    title="Focus this profile"
+                  >
+                    <User size={14} className="shrink-0" />
+                    <span className="truncate font-medium">{profile.name}</span>
+                    <span className="text-[10px] text-[var(--color-text-dim)] shrink-0">
+                      {bucket.active.length}
+                    </span>
+                  </button>
+                  <button
+                    onClick={(e) => handleDeleteProfile(profile.id, profile.name, e)}
+                    disabled={deletingProfileId === profile.id}
+                    className="opacity-0 group-hover/profile:opacity-100 hover:text-red-500 transition-all disabled:opacity-50 shrink-0"
+                    title="Delete profile"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+
+                {!collapsed && (
+                  <div className="flex flex-col gap-0.5 mt-0.5">
+                    {bucket.active.map(s => {
+                      const isActive = s.id === activeSessionId;
+                      const color = sessionColor(s);
+                      return (
+                        <div
+                          key={s.id}
+                          className={`pl-8 pr-2 py-1.5 flex items-center gap-2 w-full text-[12px] border-l-2 group/session ${
+                            isActive
+                              ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]'
+                              : 'border-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                          }`}
+                          style={isActive ? { borderLeftColor: color } : undefined}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onSelectSession(s.id)}
+                            title={`${sessionDisplayName(s)}\n${s.workspace_path}`}
+                            className="flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer"
+                          >
+                            <span
+                              className="w-2 h-2 rounded-full shrink-0"
+                              style={{ backgroundColor: color, opacity: isActive ? 1 : 0.7 }}
+                            />
+                            <Terminal size={14} className="shrink-0" style={isActive ? { color } : undefined} />
+                            <span className="truncate">{sessionDisplayName(s)}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onArchiveSession(s.id)}
+                            className="opacity-0 group-hover/session:opacity-100 text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)] shrink-0 p-0.5"
+                            title="Archive session"
+                          >
+                            <Archive size={12} />
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    {bucket.active.length === 0 && (
+                      <div className="pl-8 pr-4 py-1 text-[11px] text-[var(--color-text-dim)]">
+                        No active sessions
+                      </div>
+                    )}
+
+                    {bucket.archived.length > 0 && (
+                      <div className="mt-1">
+                        <button
+                          type="button"
+                          onClick={() => toggleArchivedExpanded(profile.id)}
+                          className="pl-8 pr-4 py-1 flex items-center gap-1.5 w-full text-left text-[11px] text-[var(--color-text-dim)] hover:text-[var(--color-text-secondary)]"
+                        >
+                          {archivedOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                          <Archive size={12} />
+                          <span>Archived ({bucket.archived.length})</span>
+                        </button>
+
+                        {archivedOpen && (
+                          <div className="flex flex-col gap-0.5">
+                            {bucket.archived.map(s => {
+                              const color = sessionColor(s);
+                              return (
+                                <div
+                                  key={s.id}
+                                  className="pl-10 pr-2 py-1.5 flex items-center gap-2 w-full text-[12px] text-[var(--color-text-dim)] hover:bg-[var(--color-bg-hover)] group/archived"
+                                >
+                                  <span
+                                    className="w-2 h-2 rounded-full shrink-0 opacity-50"
+                                    style={{ backgroundColor: color }}
+                                  />
+                                  <span className="truncate flex-1" title={sessionDisplayName(s)}>
+                                    {sessionDisplayName(s)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => onReopenSession(s.id)}
+                                    className="opacity-0 group-hover/archived:opacity-100 text-[var(--color-text-dim)] hover:text-[var(--color-accent)] shrink-0 p-0.5"
+                                    title="Reopen session"
+                                  >
+                                    <RotateCcw size={12} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => onDeleteSession(s.id)}
+                                    className="opacity-0 group-hover/archived:opacity-100 text-[var(--color-text-dim)] hover:text-red-500 shrink-0 p-0.5"
+                                    title="Permanently delete"
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {profiles.length === 0 && (
+            <div className="px-4 py-1.5 text-[11px] text-[var(--color-text-dim)]">No profiles created</div>
+          )}
         </div>
       </div>
 

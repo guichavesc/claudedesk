@@ -298,6 +298,7 @@ function describeSource(source: any): string {
 function PluginsTab({ profile }: { profile: Profile }) {
   const [marketplaces, setMarketplaces] = useState<any[]>([]);
   const [plugins, setPlugins] = useState<any[]>([]);
+  const [available, setAvailable] = useState<Array<{ spec: string; name: string; marketplace: string; description?: string; version?: string; installed: boolean }>>([]);
   const [loading, setLoading] = useState(true);
   const [mktError, setMktError] = useState('');
   const [pluginError, setPluginError] = useState('');
@@ -312,10 +313,15 @@ function PluginsTab({ profile }: { profile: Profile }) {
       window.api.getProfilePluginMarketplaces(profile.id),
       window.api.getProfilePlugins(profile.id),
     ]);
+    const installed = pluginRes.plugins || [];
     setMarketplaces(mktRes.marketplaces || []);
     setMktError(mktRes.error || '');
-    setPlugins(pluginRes.plugins || []);
+    setPlugins(installed);
     setPluginError(pluginRes.error || '');
+
+    const installedIds = installed.map((p: any) => p.id || p.name).filter(Boolean);
+    const availRes = await window.api.getProfileAvailablePlugins(profile.id, installedIds);
+    setAvailable((availRes.plugins || []).filter(p => !p.installed));
     setLoading(false);
   };
 
@@ -328,7 +334,7 @@ function PluginsTab({ profile }: { profile: Profile }) {
     setActionMessage(null);
     const result = await window.api.addProfilePluginMarketplace(profile.id, source);
     setBusySpec(null);
-    setActionMessage({ type: result.success ? 'success' : 'error', text: result.message || (result.success ? 'Marketplace added' : 'Failed to add marketplace') });
+    setActionMessage({ type: result.success ? 'success' : 'error', text: result.message || (result.success ? 'Marketplace added — install a plugin from it below' : 'Failed to add marketplace') });
     if (result.success) { setNewMarketplace(''); await load(); }
   };
 
@@ -342,15 +348,23 @@ function PluginsTab({ profile }: { profile: Profile }) {
     if (result.success) await load();
   };
 
-  const handleInstallPlugin = async () => {
-    const spec = newPluginSpec.trim();
+  const installSpec = async (spec: string) => {
     if (!spec || busySpec) return;
     setBusySpec(`plugin:${spec}`);
     setActionMessage(null);
     const result = await window.api.installProfilePlugin(profile.id, spec);
     setBusySpec(null);
-    setActionMessage({ type: result.success ? 'success' : 'error', text: result.message || (result.success ? 'Plugin installed' : 'Failed to install plugin') });
+    setActionMessage({
+      type: result.success ? 'success' : 'error',
+      text: result.message || (result.success
+        ? `Installed "${spec}" — restart the session tab to load skills`
+        : 'Failed to install plugin'),
+    });
     if (result.success) { setNewPluginSpec(''); await load(); }
+  };
+
+  const handleInstallPlugin = async () => {
+    await installSpec(newPluginSpec.trim());
   };
 
   const handleUninstallPlugin = async (spec: string) => {
@@ -366,10 +380,20 @@ function PluginsTab({ profile }: { profile: Profile }) {
   const handleToggleEnabled = async (spec: string, enabled: boolean) => {
     setPlugins(prev => prev.map(p => ((p.id || p.name) === spec ? { ...p, enabled } : p)));
     await window.api.setProfilePluginEnabled(profile.id, spec, enabled);
+    setActionMessage({
+      type: 'success',
+      text: enabled
+        ? `Enabled "${spec}" — restart the session tab to apply`
+        : `Disabled "${spec}" — restart the session tab to apply`,
+    });
   };
 
   return (
     <div className="flex flex-col gap-5">
+      <p className="text-[11px] text-[var(--color-text-dim)] leading-relaxed -mb-1">
+        Marketplaces only catalog plugins. Skills load after you <span className="text-[var(--color-text-secondary)]">Install</span> a plugin and restart the session tab.
+      </p>
+
       <div className="flex items-center justify-end -mb-2">
         <button onClick={load} title="Refresh" className="text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)] transition-colors">
           <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
@@ -433,6 +457,36 @@ function PluginsTab({ profile }: { profile: Profile }) {
         </div>
       </div>
 
+      {/* Available from marketplaces (not yet installed) */}
+      {available.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <label className="font-ui text-[11px] text-[var(--color-text-dim)] uppercase tracking-wider font-semibold">Available to Install</label>
+          <div className="flex flex-col divide-y divide-[var(--color-border-subtle)] bg-[var(--color-bg-base)] border border-[var(--color-border-subtle)] rounded-lg max-h-[180px] overflow-y-auto">
+            {available.map(p => (
+              <div key={p.spec} className="flex items-center justify-between gap-3 px-3 py-2">
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <Package size={13} className="text-[var(--color-text-dim)] shrink-0" />
+                  <div className="flex flex-col min-w-0">
+                    <span className="text-[12px] font-mono text-[var(--color-text-primary)] truncate">{p.spec}</span>
+                    {p.description && (
+                      <span className="text-[10.5px] text-[var(--color-text-dim)] truncate">{p.description}</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => installSpec(p.spec)}
+                  disabled={!!busySpec}
+                  className="shrink-0 flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-black transition-colors disabled:opacity-50"
+                >
+                  {busySpec === `plugin:${p.spec}` ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+                  Install
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Installed plugins */}
       <div className="flex flex-col gap-2">
         <label className="font-ui text-[11px] text-[var(--color-text-dim)] uppercase tracking-wider font-semibold">Installed Plugins</label>
@@ -441,7 +495,7 @@ function PluginsTab({ profile }: { profile: Profile }) {
             value={newPluginSpec}
             onChange={e => setNewPluginSpec(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') handleInstallPlugin(); }}
-            placeholder="plugin-name or plugin-name@marketplace"
+            placeholder="plugin-name@marketplace"
             className="flex-1 bg-[var(--color-bg-base)] border border-[var(--color-border-subtle)] focus:border-[var(--color-accent)] outline-none px-2.5 py-1.5 rounded text-[12px] font-mono text-[var(--color-text-primary)]"
           />
           <button
@@ -457,7 +511,9 @@ function PluginsTab({ profile }: { profile: Profile }) {
         <div className="flex flex-col divide-y divide-[var(--color-border-subtle)] bg-[var(--color-bg-base)] border border-[var(--color-border-subtle)] rounded-lg overflow-hidden">
           {pluginError && <div className="px-3 py-2 text-[12px] text-[var(--color-status-red)]">{pluginError}</div>}
           {!pluginError && plugins.length === 0 && !loading && (
-            <div className="px-3 py-2.5 text-[12px] text-[var(--color-text-dim)]">No plugins installed for this profile.</div>
+            <div className="px-3 py-2.5 text-[12px] text-[var(--color-text-dim)]">
+              No plugins installed for this profile yet. Adding a marketplace is not enough — install a plugin above.
+            </div>
           )}
           {plugins.map((p, i) => {
             const spec = p.id || p.name || `plugin-${i}`;

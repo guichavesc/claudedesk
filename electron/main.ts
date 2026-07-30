@@ -549,16 +549,16 @@ function setupIpcHandlers() {
         return { success: false, message: 'Profile not found' };
       }
 
-      // Check if profile has active sessions
-      console.log('[Delete Profile Backend] Checking for active sessions...');
-      const activeSessions = db.prepare('SELECT COUNT(*) as count FROM sessions WHERE profile_id = ?').get(profileId) as any;
-      console.log('[Delete Profile Backend] Active sessions count:', activeSessions.count);
+      // Block while any sessions (active or archived) still reference this profile.
+      console.log('[Delete Profile Backend] Checking for sessions...');
+      const sessionCount = db.prepare('SELECT COUNT(*) as count FROM sessions WHERE profile_id = ?').get(profileId) as any;
+      console.log('[Delete Profile Backend] Sessions count:', sessionCount.count);
       
-      if (activeSessions.count > 0) {
-        console.error('[Delete Profile Backend] Profile has active sessions, cannot delete');
+      if (sessionCount.count > 0) {
+        console.error('[Delete Profile Backend] Profile has sessions, cannot delete');
         return { 
           success: false, 
-          message: 'Cannot delete profile with active sessions. Please delete sessions first.' 
+          message: 'Cannot delete profile with sessions. Archive and permanently delete them first.' 
         };
       }
 
@@ -647,6 +647,13 @@ function setupIpcHandlers() {
     return profileConfig.listPlugins(buildClaudeEnv(profile));
   });
 
+  ipcMain.handle('getProfileAvailablePlugins', (_event, profileId, installedIds = []) => {
+    const db = getDb();
+    const profile: any = db.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId);
+    if (!profile) return { plugins: [], error: 'Profile not found' };
+    return profileConfig.listAvailableMarketplacePlugins(profile, installedIds);
+  });
+
   ipcMain.handle('installProfilePlugin', async (_event, profileId, spec) => {
     const db = getDb();
     const profile: any = db.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId);
@@ -670,7 +677,42 @@ function setupIpcHandlers() {
 
   ipcMain.handle('getSessions', () => {
     const db = getDb();
-    return db.prepare('SELECT * FROM sessions').all();
+    return db.prepare(`
+      SELECT * FROM sessions
+      ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, started_at DESC
+    `).all();
+  });
+
+  // Soft-close: keep history/snapshots so the session can be reopened later.
+  ipcMain.handle('archiveSession', (_event, sessionId) => {
+    const db = getDb();
+    try {
+      const session: any = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+      if (!session) return { success: false, message: 'Session not found' };
+      if (session.status === 'archived') return { success: true };
+
+      killClaudePty(sessionId);
+      db.prepare(`UPDATE sessions SET status = 'archived' WHERE id = ?`).run(sessionId);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Archive Session] Error:', error);
+      return { success: false, message: error.message };
+    }
+  });
+
+  ipcMain.handle('unarchiveSession', (_event, sessionId) => {
+    const db = getDb();
+    try {
+      const session: any = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+      if (!session) return { success: false, message: 'Session not found' };
+      if (session.status === 'active') return { success: true };
+
+      db.prepare(`UPDATE sessions SET status = 'active' WHERE id = ?`).run(sessionId);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Unarchive Session] Error:', error);
+      return { success: false, message: error.message };
+    }
   });
 
   // Surfaces the last few distinct folders worked in, so starting a new session
@@ -757,6 +799,11 @@ function setupIpcHandlers() {
       if (!session) {
         console.error('[Delete Session] Session not found in database');
         return { success: false, message: 'Session not found' };
+      }
+
+      // Permanent delete is only allowed from the Archived view.
+      if (session.status !== 'archived') {
+        return { success: false, message: 'Archive the session before permanently deleting it.' };
       }
 
       // Clean up any active PTY process for this session

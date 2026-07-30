@@ -193,6 +193,90 @@ export async function uninstallPlugin(env: NodeJS.ProcessEnv, spec: string) {
   return { success: res.success, message: res.message || (res.success ? `Uninstalled "${spec}"` : undefined) };
 }
 
+export interface AvailableMarketplacePlugin {
+  spec: string;
+  name: string;
+  marketplace: string;
+  description?: string;
+  version?: string;
+  installed: boolean;
+}
+
+/**
+ * Plugins that ship inside known marketplaces but may not be installed yet.
+ * Claude Code only loads skills/MCP from *installed + enabled* plugins — adding
+ * a marketplace alone is not enough.
+ */
+export function listAvailableMarketplacePlugins(profile: any, installedIds: string[] = []): { plugins: AvailableMarketplacePlugin[] } {
+  const installed = new Set(installedIds);
+  const configDir = resolveConfigDir(profile);
+  const marketplacesRoot = path.join(configDir, 'plugins', 'marketplaces');
+  const knownPath = path.join(configDir, 'plugins', 'known_marketplaces.json');
+  const known = readJsonFile(knownPath);
+  const results: AvailableMarketplacePlugin[] = [];
+  const seen = new Set<string>();
+
+  const marketplaceNames = new Set<string>();
+  if (known && typeof known === 'object') {
+    for (const name of Object.keys(known)) marketplaceNames.add(name);
+  }
+  try {
+    if (fs.existsSync(marketplacesRoot)) {
+      for (const entry of fs.readdirSync(marketplacesRoot, { withFileTypes: true })) {
+        if (entry.isDirectory()) marketplaceNames.add(entry.name);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  for (const marketplace of marketplaceNames) {
+    const installLocation =
+      known?.[marketplace]?.installLocation || path.join(marketplacesRoot, marketplace);
+    const manifestCandidates = [
+      path.join(installLocation, '.claude-plugin', 'marketplace.json'),
+      path.join(installLocation, '.agents', 'plugins', 'marketplace.json'),
+      path.join(installLocation, 'marketplace.json'),
+    ];
+
+    let plugins: any[] = [];
+    for (const candidate of manifestCandidates) {
+      const data = readJsonFile(candidate);
+      if (Array.isArray(data?.plugins) && data.plugins.length > 0) {
+        plugins = data.plugins;
+        break;
+      }
+    }
+
+    // Single-plugin marketplaces often only have plugin.json at the root.
+    if (plugins.length === 0) {
+      const pluginJson = readJsonFile(path.join(installLocation, '.claude-plugin', 'plugin.json'));
+      if (pluginJson?.name) {
+        plugins = [pluginJson];
+      }
+    }
+
+    for (const p of plugins) {
+      const name = p?.name;
+      if (!name || typeof name !== 'string') continue;
+      const spec = `${name}@${marketplace}`;
+      if (seen.has(spec)) continue;
+      seen.add(spec);
+      results.push({
+        spec,
+        name,
+        marketplace,
+        description: typeof p.description === 'string' ? p.description : undefined,
+        version: typeof p.version === 'string' ? p.version : undefined,
+        installed: installed.has(spec) || installed.has(name),
+      });
+    }
+  }
+
+  results.sort((a, b) => a.spec.localeCompare(b.spec));
+  return { plugins: results };
+}
+
 // Enabled/disabled state is plain config (`settings.json`'s `enabledPlugins` map), so
 // it's safe — and much faster — to flip directly rather than shelling out.
 export function setPluginEnabled(profile: any, spec: string, enabled: boolean): { success: boolean; message?: string } {

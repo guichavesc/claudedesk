@@ -11,6 +11,7 @@ import {
   Session,
   Profile,
   sessionDisplayName,
+  isSessionActive,
   SIDEBAR_WIDTH_KEY,
   SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_MIN,
@@ -24,10 +25,24 @@ function readSidebarWidth(): number {
   return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, n));
 }
 
+function pickNextActiveSession(
+  sessions: Session[],
+  leavingId: string,
+  preferredProfileId?: string,
+): string | null {
+  const remaining = sessions.filter(s => s.id !== leavingId && isSessionActive(s));
+  if (preferredProfileId) {
+    const sameProfile = remaining.find(s => s.profile_id === preferredProfileId);
+    if (sameProfile) return sameProfile.id;
+  }
+  return remaining[0]?.id ?? null;
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [focusedProfileId, setFocusedProfileId] = useState<string | null>(null);
   const [isGitPanelOpen, setIsGitPanelOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
@@ -98,9 +113,12 @@ function App() {
     const sess = await window.api.getSessions();
     setProfiles(profs);
     setSessions(sess);
-    if (sess.length > 0 && !activeSessionId) {
-      setActiveSessionId(sess[0].id);
-    }
+
+    const activeSessions = sess.filter(isSessionActive);
+    setActiveSessionId(prev => {
+      if (prev && activeSessions.some(s => s.id === prev)) return prev;
+      return activeSessions[0]?.id ?? null;
+    });
   };
 
   const handleCreateSession = async (data: any) => {
@@ -116,25 +134,53 @@ function App() {
     setIsProfileModalOpen(false);
   };
 
-  const handleCloseSession = async (sessionId: string) => {
+  const handleArchiveSession = async (sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
     const sessionName = session ? sessionDisplayName(session) : 'this session';
 
-    if (!confirm(`Close "${sessionName}"? This will end the session and all unsaved work will be lost.`)) {
+    if (!confirm(`Archive "${sessionName}"? You can reopen it later from the sidebar.`)) {
+      return;
+    }
+
+    const result = await window.api.archiveSession(sessionId);
+
+    if (result.success) {
+      if (activeSessionId === sessionId) {
+        setActiveSessionId(pickNextActiveSession(sessions, sessionId, session?.profile_id));
+      }
+      await loadData();
+    } else {
+      alert(result.message || 'Failed to archive session');
+    }
+  };
+
+  const handleReopenSession = async (sessionId: string) => {
+    const result = await window.api.unarchiveSession(sessionId);
+    if (result.success) {
+      await loadData();
+      setActiveSessionId(sessionId);
+    } else {
+      alert(result.message || 'Failed to reopen session');
+    }
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    const session = sessions.find(s => s.id === sessionId);
+    const sessionName = session ? sessionDisplayName(session) : 'this session';
+
+    if (!confirm(`Permanently delete "${sessionName}"? This cannot be undone.`)) {
       return;
     }
 
     const result = await window.api.deleteSession(sessionId);
-    
+
     if (result.success) {
-      // If we're closing the active session, switch to another one
       if (activeSessionId === sessionId) {
-        const remainingSessions = sessions.filter(s => s.id !== sessionId);
-        setActiveSessionId(remainingSessions.length > 0 ? remainingSessions[0].id : null);
+        setActiveSessionId(pickNextActiveSession(sessions, sessionId, session?.profile_id));
       }
       await loadData();
     } else {
-      alert(result.message || 'Failed to close session');
+      alert(result.message || 'Failed to delete session');
     }
   };
 
@@ -148,18 +194,19 @@ function App() {
     }
   };
 
-  const activeSession = sessions.find(s => s.id === activeSessionId);
+  const activeSessions = sessions.filter(isSessionActive);
+  const activeSession = activeSessions.find(s => s.id === activeSessionId);
   const activeProfile = activeSession ? profiles.find(p => p.id === activeSession.profile_id) : undefined;
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[var(--color-bg-base)] text-[var(--color-text-primary)] font-mono overflow-hidden">
       <TitleBar />
       <TabsBar
-        sessions={sessions}
+        sessions={activeSessions}
         activeId={activeSessionId}
         onSelect={setActiveSessionId}
         onNew={() => setIsSessionModalOpen(true)}
-        onClose={handleCloseSession}
+        onArchive={handleArchiveSession}
         onChangeColor={handleChangeSessionColor}
       />
       <div className={`flex flex-1 overflow-hidden min-h-0 ${isResizingSidebar ? 'select-none' : ''}`}>
@@ -169,8 +216,14 @@ function App() {
               profiles={profiles}
               sessions={sessions}
               activeSessionId={activeSessionId}
+              focusedProfileId={focusedProfileId}
               width={sidebarWidth}
               onSelectSession={setActiveSessionId}
+              onFocusProfile={setFocusedProfileId}
+              onClearProfileFocus={() => setFocusedProfileId(null)}
+              onArchiveSession={handleArchiveSession}
+              onReopenSession={handleReopenSession}
+              onDeleteSession={handleDeleteSession}
               onReload={loadData}
               onNewProfile={() => setIsProfileModalOpen(true)}
               onOpenSettings={() => setIsSettingsModalOpen(true)}

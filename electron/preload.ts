@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('api', {
   getSessions: () => ipcRenderer.invoke('getSessions'),
   getRecentWorkspaces: () => ipcRenderer.invoke('getRecentWorkspaces'),
   createSession: (sessionData: any) => ipcRenderer.invoke('createSession', sessionData),
+  archiveSession: (sessionId: string) => ipcRenderer.invoke('archiveSession', sessionId),
+  unarchiveSession: (sessionId: string) => ipcRenderer.invoke('unarchiveSession', sessionId),
   deleteSession: (sessionId: string) => ipcRenderer.invoke('deleteSession', sessionId),
   updateSessionMode: (sessionId: string, permissionMode: string) => ipcRenderer.invoke('updateSessionMode', sessionId, permissionMode),
   updateSessionColor: (sessionId: string, color: string) => ipcRenderer.invoke('updateSessionColor', sessionId, color),
@@ -51,6 +53,8 @@ contextBridge.exposeInMainWorld('api', {
   addProfilePluginMarketplace: (profileId: string, source: string) => ipcRenderer.invoke('addProfilePluginMarketplace', profileId, source),
   removeProfilePluginMarketplace: (profileId: string, name: string) => ipcRenderer.invoke('removeProfilePluginMarketplace', profileId, name),
   getProfilePlugins: (profileId: string) => ipcRenderer.invoke('getProfilePlugins', profileId),
+  getProfileAvailablePlugins: (profileId: string, installedIds?: string[]) =>
+    ipcRenderer.invoke('getProfileAvailablePlugins', profileId, installedIds || []),
   installProfilePlugin: (profileId: string, spec: string) => ipcRenderer.invoke('installProfilePlugin', profileId, spec),
   uninstallProfilePlugin: (profileId: string, spec: string) => ipcRenderer.invoke('uninstallProfilePlugin', profileId, spec),
   setProfilePluginEnabled: (profileId: string, spec: string, enabled: boolean) =>

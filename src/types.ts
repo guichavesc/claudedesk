@@ -35,18 +35,24 @@ export const SESSION_COLORS = [
 
 export type SessionColor = (typeof SESSION_COLORS)[number] | string;
 
+export type SessionStatus = 'active' | 'archived';
+
 export interface Session {
   id: string;
   profile_id: string;
   workspace_path: string;
   model: string;
   permission_mode: PermissionMode;
-  status: string;
+  status: SessionStatus | string;
   started_at: string;
   /** Short AI-generated description of the conversation, when available. */
   title?: string | null;
   /** Hex highlight color for tabs / sidebar identification. */
   color?: string | null;
+}
+
+export function isSessionActive(session: Session): boolean {
+  return session.status !== 'archived';
 }
 
 /** Pick the least-used palette color so new sessions stay visually distinct. */
@@ -154,12 +160,15 @@ declare global {
       addProfilePluginMarketplace: (profileId: string, source: string) => Promise<{ success: boolean; message?: string }>;
       removeProfilePluginMarketplace: (profileId: string, name: string) => Promise<{ success: boolean; message?: string }>;
       getProfilePlugins: (profileId: string) => Promise<{ plugins: any[]; error?: string; raw?: string }>;
+      getProfileAvailablePlugins: (profileId: string, installedIds?: string[]) => Promise<{ plugins: Array<{ spec: string; name: string; marketplace: string; description?: string; version?: string; installed: boolean }>; error?: string }>;
       installProfilePlugin: (profileId: string, spec: string) => Promise<{ success: boolean; message?: string }>;
       uninstallProfilePlugin: (profileId: string, spec: string) => Promise<{ success: boolean; message?: string }>;
       setProfilePluginEnabled: (profileId: string, spec: string, enabled: boolean) => Promise<{ success: boolean; message?: string }>;
       getSessions: () => Promise<Session[]>;
       getRecentWorkspaces: () => Promise<string[]>;
       createSession: (data: { profileId: string; workspacePath: string; model: string; permissionMode?: PermissionMode }) => Promise<string>;
+      archiveSession: (sessionId: string) => Promise<{ success: boolean; message?: string }>;
+      unarchiveSession: (sessionId: string) => Promise<{ success: boolean; message?: string }>;
       deleteSession: (sessionId: string) => Promise<{ success: boolean; message?: string }>;
       updateSessionMode: (sessionId: string, permissionMode: PermissionMode) => Promise<{ success: boolean; message?: string }>;
       updateSessionColor: (sessionId: string, color: string) => Promise<{ success: boolean; message?: string }>;
