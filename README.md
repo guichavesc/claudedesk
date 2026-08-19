@@ -75,7 +75,7 @@ You do not need all three CLIs. Add only the providers you use.
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/claudedesk.git
+git clone https://github.com/guichavesc/claudedesk.git
 cd claudedesk
 npm install
 npm run dev
