@@ -208,6 +208,83 @@ export function initDb() {
   } catch (e) {
     console.error('Migration error (color):', e);
   }
+
+  // Migration: user-controlled tab order (drag-reorder in the tabs bar).
+  try {
+    const sessionColumns = db.prepare("PRAGMA table_info(sessions)").all() as any[];
+    const hasSortOrder = sessionColumns.some((col: any) => col.name === 'sort_order');
+
+    if (!hasSortOrder) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN sort_order INTEGER DEFAULT 0`);
+      // Newest-first matches the previous listing so existing layouts stay familiar.
+      const rows: any[] = db.prepare('SELECT id FROM sessions ORDER BY started_at DESC').all();
+      const update = db.prepare('UPDATE sessions SET sort_order = ? WHERE id = ?');
+      rows.forEach((row, i) => update.run(i, row.id));
+      console.log('Database migration: Added sort_order column to sessions');
+    }
+  } catch (e) {
+    console.error('Migration error (sort_order):', e);
+  }
+
+  // Multi-provider: profiles.provider (claude | gemini | codex)
+  try {
+    const columns = db.prepare('PRAGMA table_info(profiles)').all() as any[];
+    if (!columns.some((col: any) => col.name === 'provider')) {
+      db.exec(`ALTER TABLE profiles ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'`);
+      console.log('Database migration: Added provider column to profiles');
+    }
+  } catch (e) {
+    console.error('Migration error (profiles.provider):', e);
+  }
+
+  // Multi-provider session fields + transfer parent link
+  try {
+    const sessionColumns = db.prepare('PRAGMA table_info(sessions)').all() as any[];
+    const addCol = (name: string, ddl: string) => {
+      if (!sessionColumns.some((col: any) => col.name === name)) {
+        db.exec(ddl);
+        console.log(`Database migration: Added ${name} column to sessions`);
+      }
+    };
+    addCol('provider', `ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT 'claude'`);
+    addCol('parent_session_id', `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`);
+    addCol('provider_bound', `ALTER TABLE sessions ADD COLUMN provider_bound INTEGER DEFAULT 0`);
+    addCol('provider_session_id', `ALTER TABLE sessions ADD COLUMN provider_session_id TEXT`);
+
+    // Backfill provider_bound from legacy claude_bound
+    const refreshed = db.prepare('PRAGMA table_info(sessions)').all() as any[];
+    if (refreshed.some((col: any) => col.name === 'claude_bound') && refreshed.some((col: any) => col.name === 'provider_bound')) {
+      db.exec(`UPDATE sessions SET provider_bound = 1 WHERE claude_bound = 1 AND (provider_bound IS NULL OR provider_bound = 0)`);
+    }
+    // Backfill session.provider from profile when missing/null
+    db.exec(`
+      UPDATE sessions SET provider = (
+        SELECT COALESCE(p.provider, 'claude') FROM profiles p WHERE p.id = sessions.profile_id
+      )
+      WHERE provider IS NULL OR provider = ''
+    `);
+  } catch (e) {
+    console.error('Migration error (sessions multi-provider):', e);
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  try {
+    const sessionColumns = db.prepare('PRAGMA table_info(sessions)').all() as any[];
+    if (!sessionColumns.some((col: any) => col.name === 'project_id')) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN project_id TEXT`);
+      console.log('Database migration: Added project_id column to sessions');
+    }
+  } catch (e) {
+    console.error('Migration error (sessions.project_id):', e);
+  }
 }
 
 export function getDb() {

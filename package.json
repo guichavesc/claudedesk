@@ -1,9 +1,9 @@
 {
   "name": "claudedesk",
   "productName": "ClaudeDesk",
-  "description": "ClaudeDesk — desktop sessions for Claude Code",
+  "description": "Desktop workbench for Claude Code, Gemini CLI, and Codex sessions",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.8",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "node scripts/patch-electron-app-name.mjs && vite",

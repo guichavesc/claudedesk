@@ -9,11 +9,27 @@ interface TabsBarProps {
   onNew: () => void;
   onArchive: (id: string) => void;
   onChangeColor: (id: string, color: string) => void;
+  onRename: (id: string, title: string) => void;
+  onReorder: (orderedIds: string[]) => void;
 }
 
-export function TabsBar({ sessions, activeId, onSelect, onNew, onArchive, onChangeColor }: TabsBarProps) {
+export function TabsBar({
+  sessions,
+  activeId,
+  onSelect,
+  onNew,
+  onArchive,
+  onChangeColor,
+  onRename,
+  onReorder,
+}: TabsBarProps) {
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dragIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!colorPickerFor) return;
@@ -33,9 +49,51 @@ export function TabsBar({ sessions, activeId, onSelect, onNew, onArchive, onChan
     };
   }, [colorPickerFor]);
 
+  useEffect(() => {
+    if (editingId) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editingId]);
+
   const handleArchive = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     onArchive(sessionId);
+  };
+
+  const startRename = (session: Session) => {
+    setEditingId(session.id);
+    setEditValue(session.title?.trim() || '');
+    setColorPickerFor(null);
+  };
+
+  const commitRename = () => {
+    if (!editingId) return;
+    const id = editingId;
+    const value = editValue;
+    setEditingId(null);
+    onRename(id, value);
+  };
+
+  const cancelRename = () => {
+    setEditingId(null);
+  };
+
+  const handleDropOn = (targetId: string) => {
+    const sourceId = dragIdRef.current;
+    dragIdRef.current = null;
+    setDragOverId(null);
+    if (!sourceId || sourceId === targetId) return;
+
+    const ids = sessions.map(s => s.id);
+    const from = ids.indexOf(sourceId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+
+    const next = [...ids];
+    next.splice(from, 1);
+    next.splice(to, 0, sourceId);
+    onReorder(next);
   };
 
   return (
@@ -45,16 +103,50 @@ export function TabsBar({ sessions, activeId, onSelect, onNew, onArchive, onChan
         const label = sessionDisplayName(session);
         const color = sessionColor(session);
         const isPickerOpen = colorPickerFor === session.id;
+        const isEditing = editingId === session.id;
+        const isDragOver = dragOverId === session.id;
 
         return (
           <div
             key={session.id}
-            onClick={() => onSelect(session.id)}
+            draggable={!isEditing}
+            onDragStart={(e) => {
+              if (isEditing) {
+                e.preventDefault();
+                return;
+              }
+              dragIdRef.current = session.id;
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', session.id);
+            }}
+            onDragEnd={() => {
+              dragIdRef.current = null;
+              setDragOverId(null);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              if (dragOverId !== session.id) setDragOverId(session.id);
+            }}
+            onDragLeave={() => {
+              if (dragOverId === session.id) setDragOverId(null);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              handleDropOn(session.id);
+            }}
+            onClick={() => {
+              if (!isEditing) onSelect(session.id);
+            }}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              startRename(session);
+            }}
             onContextMenu={(e) => {
               e.preventDefault();
               setColorPickerFor(session.id);
             }}
-            title={`${label} · ${session.model}\nRight-click to change color`}
+            title={`${label} · ${session.model}\nDouble-click to rename · Drag to reorder · Right-click for color`}
             className={`
               relative h-[32px] pl-3 pr-8 flex items-center gap-2 cursor-pointer text-[12px] min-w-[160px] max-w-[280px] border-b-2
               transition-colors duration-150 ease-out group
@@ -62,13 +154,13 @@ export function TabsBar({ sessions, activeId, onSelect, onNew, onArchive, onChan
                 ? 'text-[var(--color-text-primary)]'
                 : 'border-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
               }
+              ${isDragOver ? 'ring-1 ring-inset ring-[var(--color-accent)]/60' : ''}
             `}
             style={isActive ? {
               borderBottomColor: color,
               backgroundColor: `${color}18`,
             } : undefined}
           >
-            {/* Color chip — click to recolor; also the main visual identity of the tab. */}
             <button
               type="button"
               onClick={(e) => {
@@ -81,7 +173,29 @@ export function TabsBar({ sessions, activeId, onSelect, onNew, onArchive, onChan
               style={{ backgroundColor: color }}
               title="Change tab color"
             />
-            <span className="truncate flex-1">{label}</span>
+            {isEditing ? (
+              <input
+                ref={inputRef}
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                onBlur={commitRename}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commitRename();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelRename();
+                  }
+                }}
+                className="flex-1 min-w-0 bg-[var(--color-bg-base)] border border-[var(--color-border-default)] rounded px-1 py-0.5 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+                placeholder="Session title"
+              />
+            ) : (
+              <span className="truncate flex-1">{label}</span>
+            )}
             <button
               onClick={(e) => handleArchive(e, session.id)}
               className="absolute right-1.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 hover:bg-[var(--color-bg-base)] rounded p-0.5 transition-all"

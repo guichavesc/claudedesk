@@ -1,8 +1,23 @@
+export type ProviderId = 'claude' | 'gemini' | 'codex';
+
 export interface Profile {
   id: string;
   name: string;
-  auth_type: 'subscription' | 'apikey';
+  auth_type: 'subscription' | 'apikey' | 'google' | 'chatgpt' | string;
+  provider?: ProviderId | string;
   created_at: string;
+}
+
+export function profileProvider(profile?: Profile | null): ProviderId {
+  if (profile?.provider === 'gemini') return 'gemini';
+  if (profile?.provider === 'codex') return 'codex';
+  return 'claude';
+}
+
+export function providerDisplayName(provider?: string | null): string {
+  if (provider === 'gemini') return 'Gemini';
+  if (provider === 'codex') return 'Codex';
+  return 'Claude';
 }
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
@@ -13,6 +28,15 @@ export const SIDEBAR_WIDTH_KEY = 'claudedesk:sidebarWidth';
 export const SIDEBAR_WIDTH_DEFAULT = 220;
 export const SIDEBAR_WIDTH_MIN = 160;
 export const SIDEBAR_WIDTH_MAX = 420;
+
+export const UNCATEGORIZED_PROJECT_ID = '__uncategorized__';
+
+export interface Project {
+  id: string;
+  name: string;
+  sort_order?: number | null;
+  created_at: string;
+}
 
 export const PERMISSION_MODES: { value: PermissionMode; label: string; description: string }[] = [
   { value: 'default', label: 'Default', description: 'Prompts for approval before edits and commands' },
@@ -49,6 +73,14 @@ export interface Session {
   title?: string | null;
   /** Hex highlight color for tabs / sidebar identification. */
   color?: string | null;
+  /** User-controlled tab order (lower = further left). */
+  sort_order?: number | null;
+  /** Provider that owns this session (denormalized from profile). */
+  provider?: ProviderId | string | null;
+  /** Session this one was transferred from, if any. */
+  parent_session_id?: string | null;
+  /** Named project this session belongs to, if any. */
+  project_id?: string | null;
 }
 
 export function isSessionActive(session: Session): boolean {
@@ -78,6 +110,12 @@ export function pickSessionColor(existing: Array<{ color?: string | null }>): st
 
 export function sessionColor(session: { color?: string | null }): string {
   return session.color || SESSION_COLORS[0];
+}
+
+/** Short title used in the workbench list (no folder suffix). */
+export function sessionTitle(session: Session): string {
+  if (session.title?.trim()) return session.title.trim();
+  return session.workspace_path.split('/').filter(Boolean).pop() || 'Untitled';
 }
 
 /** Tab/sidebar label: "Brief description - folder" when titled, else just the folder. */
@@ -151,7 +189,19 @@ declare global {
   interface Window {
     api: {
       getProfiles: () => Promise<Profile[]>;
-      createProfile: (data: { name: string; authType: string; apiKey?: string }) => Promise<string>;
+      createProfile: (data: {
+        name: string;
+        authType: string;
+        apiKey?: string;
+        provider?: ProviderId | string;
+      }) => Promise<string | { success: boolean; id?: string; message?: string; installHint?: string }>;
+      checkProviderCli: (provider: ProviderId | string) => Promise<{
+        available: boolean;
+        path?: string;
+        viaNpx?: boolean;
+        message?: string;
+        installHint?: string;
+      }>;
       deleteProfile: (profileId: string) => Promise<{ success: boolean; message?: string }>;
       getProfileMcpServers: (profileId: string) => Promise<{ servers: McpServerEntry[]; error?: string }>;
       saveProfileMcpServer: (profileId: string, name: string, config: Omit<McpServerEntry, 'name'>, previousName?: string) => Promise<{ success: boolean; message?: string }>;
@@ -164,14 +214,22 @@ declare global {
       installProfilePlugin: (profileId: string, spec: string) => Promise<{ success: boolean; message?: string }>;
       uninstallProfilePlugin: (profileId: string, spec: string) => Promise<{ success: boolean; message?: string }>;
       setProfilePluginEnabled: (profileId: string, spec: string, enabled: boolean) => Promise<{ success: boolean; message?: string }>;
+      getProjects: () => Promise<Project[]>;
+      createProject: (name: string) => Promise<{ success: boolean; id?: string; message?: string }>;
+      renameProject: (projectId: string, name: string) => Promise<{ success: boolean; message?: string }>;
+      deleteProject: (projectId: string) => Promise<{ success: boolean; message?: string }>;
+      updateSessionProject: (sessionId: string, projectId: string | null) => Promise<{ success: boolean; message?: string }>;
+      getRunningSessionIds: () => Promise<string[]>;
       getSessions: () => Promise<Session[]>;
       getRecentWorkspaces: () => Promise<string[]>;
-      createSession: (data: { profileId: string; workspacePath: string; model: string; permissionMode?: PermissionMode }) => Promise<string>;
+      createSession: (data: { profileId: string; workspacePath: string; model: string; permissionMode?: PermissionMode; projectId?: string | null }) => Promise<string>;
       archiveSession: (sessionId: string) => Promise<{ success: boolean; message?: string }>;
       unarchiveSession: (sessionId: string) => Promise<{ success: boolean; message?: string }>;
       deleteSession: (sessionId: string) => Promise<{ success: boolean; message?: string }>;
       updateSessionMode: (sessionId: string, permissionMode: PermissionMode) => Promise<{ success: boolean; message?: string }>;
       updateSessionColor: (sessionId: string, color: string) => Promise<{ success: boolean; message?: string }>;
+      updateSessionTitle: (sessionId: string, title: string) => Promise<{ success: boolean; title?: string | null; message?: string }>;
+      reorderSessions: (orderedIds: string[]) => Promise<{ success: boolean; message?: string }>;
       restartCliSession: (sessionId: string, cols: number, rows: number) => Promise<{ success: boolean; message?: string }>;
       getMessages: (sessionId: string) => Promise<Message[]>;
       saveMessage: (message: Omit<Message, 'id'>) => Promise<string>;
@@ -197,6 +255,17 @@ declare global {
       openWorkspaceFolder: (workspacePath: string) => Promise<boolean>;
       startClaudeAuth: (profileName: string) => Promise<{ success: boolean; message?: string }>;
       verifyClaudeAuth: (profileName: string) => Promise<{ success: boolean; message?: string }>;
+      verifyGeminiAuth: (profileName: string) => Promise<{ success: boolean; message?: string }>;
+      verifyCodexAuth: (profileName: string) => Promise<{ success: boolean; message?: string }>;
+      getProviderAuthCommand: (provider: ProviderId | string, profileName: string) => Promise<string>;
+      transferSession: (data: {
+        sourceSessionId: string;
+        targetProfileId: string;
+        model?: string;
+        cols?: number;
+        rows?: number;
+      }) => Promise<{ success: boolean; sessionId?: string; message?: string }>;
+      onSessionLimitDetected: (callback: (sessionId: string) => void) => () => void;
       closeWindow: () => Promise<void>;
       minimizeWindow: () => Promise<void>;
       maximizeWindow: () => Promise<void>;

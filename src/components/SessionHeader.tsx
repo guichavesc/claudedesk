@@ -1,20 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { FolderOpen, GitBranch, User, Calendar } from 'lucide-react';
-import { Profile, formatSessionStarted } from '../types';
+import { Profile, Session, formatSessionStarted, providerDisplayName, profileProvider, sessionTitle } from '../types';
 import { BranchSwitcher } from './BranchSwitcher';
 
 interface SessionHeaderProps {
-  workspacePath: string;
-  startedAt: string;
+  session: Session;
   profile?: Profile;
   isGitPanelOpen: boolean;
   onToggleGitPanel: () => void;
+  onMigrate: () => void;
 }
 
-export function SessionHeader({ workspacePath, startedAt, profile, isGitPanelOpen, onToggleGitPanel }: SessionHeaderProps) {
+export function SessionHeader({ session, profile, isGitPanelOpen, onToggleGitPanel, onMigrate }: SessionHeaderProps) {
+  const workspacePath = session.workspace_path;
   const folderName = workspacePath.split('/').filter(Boolean).pop() || workspacePath;
-  const parentPath = workspacePath.slice(0, workspacePath.length - folderName.length).replace(/\/$/, '');
-  const startedLabel = formatSessionStarted(startedAt);
+  const startedLabel = formatSessionStarted(session.started_at);
 
   const [branch, setBranch] = useState('');
   const [isGitRepo, setIsGitRepo] = useState(true);
@@ -56,7 +55,6 @@ export function SessionHeader({ workspacePath, startedAt, profile, isGitPanelOpe
       }
     };
     fetchBranch();
-    // Poll so switching branches from the terminal or elsewhere reflects here too.
     const interval = setInterval(fetchBranch, 3000);
     return () => {
       cancelled = true;
@@ -65,54 +63,37 @@ export function SessionHeader({ workspacePath, startedAt, profile, isGitPanelOpe
   }, [workspacePath]);
 
   return (
-    <div className="h-[36px] shrink-0 flex items-center justify-between px-4 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] text-[12px] gap-3">
-      <div className="flex items-center gap-1.5 min-w-0 flex-1" title={workspacePath}>
-        <FolderOpen size={13} className="text-[var(--color-accent)] shrink-0" />
-        <span className="text-[var(--color-text-primary)] font-medium truncate">{folderName}</span>
-        {parentPath && (
-          <span className="text-[var(--color-text-dim)] truncate">{parentPath}</span>
-        )}
-      </div>
-
-      <div className="flex items-center gap-2 shrink-0">
-        <span
-          className="flex items-center gap-1.5 px-2 py-1 rounded text-[var(--color-text-dim)]"
-          title={startedLabel}
-        >
-          <Calendar size={12} />
-          <span className="whitespace-nowrap">{startedLabel}</span>
-        </span>
+    <div className="h-[44px] shrink-0 flex items-center gap-3 px-4 border-b border-[var(--rule)] bg-[var(--surface)]">
+      <span className="text-[13px] font-bold truncate">{sessionTitle(session)}</span>
+      <span className="font-mono text-[10.5px] text-[var(--dim)] truncate" title={workspacePath}>
+        {workspacePath}{branch ? ` · ${branch}` : ''}
+      </span>
+      <div className="ml-auto flex items-center gap-2 font-mono text-[10px] tracking-widest shrink-0">
         {profile && (
-          <span
-            className="flex items-center gap-1.5 px-2 py-1 rounded text-[var(--color-text-dim)]"
-            title={`Profile: ${profile.name}`}
-          >
-            <User size={12} />
-            <span>{profile.name}</span>
+          <span className="cd-chip-accent">
+            {providerDisplayName(profileProvider(profile)).toUpperCase()} · {profile.name.toUpperCase()}
           </span>
         )}
+        <span className="text-[var(--dim)]" title={startedLabel}>{startedLabel.replace('Session Started ', '').toUpperCase()}</span>
         {isGitRepo && (
           <BranchSwitcher workspacePath={workspacePath} branch={branch} onBranchChanged={refreshBranch} compact />
         )}
         <button
+          type="button"
           onClick={() => window.api.openWorkspaceFolder(workspacePath)}
-          className="flex items-center gap-1.5 px-2 py-1 rounded text-[var(--color-text-dim)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
-          title="Open folder in Finder"
+          className="cd-btn-outline"
         >
-          <FolderOpen size={12} />
-          <span>Reveal</span>
+          REVEAL
         </button>
         <button
+          type="button"
           onClick={onToggleGitPanel}
-          className={`flex items-center gap-1.5 px-2 py-1 rounded transition-colors ${
-            isGitPanelOpen
-              ? 'bg-[var(--color-bg-hover)] text-[var(--color-accent)]'
-              : 'text-[var(--color-text-dim)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
-          }`}
-          title="Toggle git diff panel"
+          className={isGitPanelOpen ? 'cd-btn-outline border-[var(--accent)] text-[var(--accent)]' : 'cd-btn-outline'}
         >
-          <GitBranch size={12} />
-          <span>Diff</span>
+          DIFF
+        </button>
+        <button type="button" onClick={onMigrate} className="cd-btn-outline border-[var(--accent)] text-[var(--accent)]">
+          MIGRATE →
         </button>
       </div>
     </div>

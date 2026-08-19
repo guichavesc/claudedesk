@@ -7,12 +7,18 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies and build output
 node_modules
 dist
 dist-electron
 dist-ssr
 release
+releases
 *.local
+*.zip
+
+# Design dumps (not part of the app)
+ui-ux/
 
 # Editor directories and files
 .vscode/*
@@ -24,3 +30,5 @@ release
 *.njsproj
 *.sln
 *.sw?
+.superpowers/
+.cursor/

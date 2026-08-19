@@ -1,8 +1,10 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
+
+import { APPEARANCE_EVENT, adaptAnsiForLightTheme, isLightTheme, readTerminalFont, xtermThemeFromCss } from '../lib/appearance';
 
 export interface TerminalViewHandle {
   write: (data: string) => void;
@@ -17,29 +19,7 @@ interface TerminalViewProps {
   onData?: (data: string) => void;
 }
 
-const THEME = {
-  background: '#0D0D0D',
-  foreground: '#E8E8E8',
-  cursor: '#D4A843',
-  cursorAccent: '#0D0D0D',
-  selectionBackground: '#D4A84340',
-  black: '#0D0D0D',
-  red: '#E05C5C',
-  green: '#4CAF7D',
-  yellow: '#D4A843',
-  blue: '#5B8DEF',
-  magenta: '#B583D8',
-  cyan: '#5BC6D8',
-  white: '#E8E8E8',
-  brightBlack: '#4A4A4A',
-  brightRed: '#E88080',
-  brightGreen: '#6FCB9A',
-  brightYellow: '#E0BD66',
-  brightBlue: '#7EA6F5',
-  brightMagenta: '#C89DE3',
-  brightCyan: '#7ED4E3',
-  brightWhite: '#FFFFFF',
-};
+const THEME = () => xtermThemeFromCss();
 
 export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(function TerminalView(
   { onResize, onData },
@@ -50,13 +30,12 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onResizeRef = useRef(onResize);
   const onDataRef = useRef(onData);
-  const [isFocused, setIsFocused] = useState(false);
 
   useEffect(() => { onResizeRef.current = onResize; }, [onResize]);
   useEffect(() => { onDataRef.current = onData; }, [onData]);
 
   useImperativeHandle(ref, () => ({
-    write: (data: string) => termRef.current?.write(data),
+    write: (data: string) => termRef.current?.write(adaptAnsiForLightTheme(data)),
     clear: () => termRef.current?.clear(),
     fit: () => fitAddonRef.current?.fit(),
     focus: () => termRef.current?.focus(),
@@ -70,11 +49,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     if (!containerRef.current) return;
 
     const term = new Terminal({
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+      fontFamily: `"${readTerminalFont()}", ui-monospace, monospace`,
       fontSize: 13,
       lineHeight: 1.5,
       letterSpacing: 0.2,
-      theme: THEME,
+      theme: THEME(),
       cursorBlink: true,
       cursorStyle: 'bar',
       scrollback: 10000,
@@ -95,12 +74,6 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     // Stream every keystroke typed while the terminal is focused straight to the PTY —
     // this is what makes it a *real* terminal instead of a line-based chat input.
     const dataDisposable = term.onData(data => onDataRef.current?.(data));
-
-    const textarea = term.textarea;
-    const handleFocus = () => setIsFocused(true);
-    const handleBlur = () => setIsFocused(false);
-    textarea?.addEventListener('focus', handleFocus);
-    textarea?.addEventListener('blur', handleBlur);
 
     let lastCols = term.cols;
     let lastRows = term.rows;
@@ -127,10 +100,25 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     });
     resizeObserver.observe(containerRef.current);
 
+    const onAppearance = () => {
+      term.options.theme = THEME();
+      term.options.fontFamily = `"${readTerminalFont()}", ui-monospace, monospace`;
+      // Force the CLI to repaint so truecolor spans go through adaptAnsiForLightTheme.
+      const cols = term.cols;
+      const rows = term.rows;
+      if (cols > 2) {
+        onResizeRef.current?.(cols - 1, rows);
+        requestAnimationFrame(() => onResizeRef.current?.(cols, rows));
+      }
+    };
+    window.addEventListener(APPEARANCE_EVENT, onAppearance);
+    if (isLightTheme()) {
+      requestAnimationFrame(onAppearance);
+    }
+
     return () => {
+      window.removeEventListener(APPEARANCE_EVENT, onAppearance);
       if (rafHandle !== null) cancelAnimationFrame(rafHandle);
-      textarea?.removeEventListener('focus', handleFocus);
-      textarea?.removeEventListener('blur', handleBlur);
       dataDisposable.dispose();
       resizeObserver.disconnect();
       term.dispose();
@@ -139,14 +127,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
   }, []);
 
   return (
-    <div className="flex-1 min-h-0 min-w-0 p-3">
+    <div className="flex-1 min-h-0 min-w-0">
       <div
         onClick={() => termRef.current?.focus()}
-        className={`h-full rounded-lg border transition-shadow duration-200 overflow-hidden bg-[#0D0D0D] pt-2 pb-2 pl-4 pr-4 ${
-          isFocused
-            ? 'border-[var(--color-accent)]/50 shadow-[0_0_0_1px_var(--color-accent)_inset,0_0_24px_-8px_var(--color-accent)]'
-            : 'border-[var(--color-border-subtle)]'
-        }`}
+        className="h-full overflow-hidden bg-[var(--bg)] pt-2 pb-2 pl-4 pr-4"
       >
         {/* No padding here — xterm measures this exact element to compute cols/rows,
             so any padding on it throws off the fit calculation and causes overflow/flicker. */}

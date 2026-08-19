@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   User,
   Terminal,
@@ -24,6 +24,7 @@ interface SidebarProps {
   onArchiveSession: (sessionId: string) => void;
   onReopenSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, title: string) => void;
   onReload: () => void;
   onNewProfile: () => void;
   onOpenSettings: () => void;
@@ -41,6 +42,7 @@ export function Sidebar({
   onArchiveSession,
   onReopenSession,
   onDeleteSession,
+  onRenameSession,
   onNewProfile,
   onReload,
   onOpenSettings,
@@ -48,6 +50,9 @@ export function Sidebar({
   const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
   const [collapsedProfiles, setCollapsedProfiles] = useState<Record<string, boolean>>({});
   const [expandedArchived, setExpandedArchived] = useState<Record<string, boolean>>({});
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const editInputRef = useRef<HTMLInputElement>(null);
 
   const sessionsByProfile = useMemo(() => {
     const map = new Map<string, { active: Session[]; archived: Session[] }>();
@@ -106,6 +111,28 @@ export function Sidebar({
   const toggleArchivedExpanded = (profileId: string) => {
     setExpandedArchived(prev => ({ ...prev, [profileId]: !prev[profileId] }));
   };
+
+  useEffect(() => {
+    if (editingId) {
+      editInputRef.current?.focus();
+      editInputRef.current?.select();
+    }
+  }, [editingId]);
+
+  const startRename = (session: Session) => {
+    setEditingId(session.id);
+    setEditValue(session.title?.trim() || '');
+  };
+
+  const commitRename = () => {
+    if (!editingId) return;
+    const id = editingId;
+    const value = editValue;
+    setEditingId(null);
+    onRenameSession(id, value);
+  };
+
+  const cancelRename = () => setEditingId(null);
 
   return (
     <div
@@ -192,6 +219,7 @@ export function Sidebar({
                     {bucket.active.map(s => {
                       const isActive = s.id === activeSessionId;
                       const color = sessionColor(s);
+                      const isEditing = editingId === s.id;
                       return (
                         <div
                           key={s.id}
@@ -202,27 +230,54 @@ export function Sidebar({
                           }`}
                           style={isActive ? { borderLeftColor: color } : undefined}
                         >
-                          <button
-                            type="button"
-                            onClick={() => onSelectSession(s.id)}
-                            title={`${sessionDisplayName(s)}\n${s.workspace_path}`}
-                            className="flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer"
-                          >
-                            <span
-                              className="w-2 h-2 rounded-full shrink-0"
-                              style={{ backgroundColor: color, opacity: isActive ? 1 : 0.7 }}
+                          {isEditing ? (
+                            <input
+                              ref={editInputRef}
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              onBlur={commitRename}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  commitRename();
+                                } else if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  cancelRename();
+                                }
+                              }}
+                              className="flex-1 min-w-0 bg-[var(--color-bg-base)] border border-[var(--color-border-default)] rounded px-1 py-0.5 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+                              placeholder="Session title"
                             />
-                            <Terminal size={14} className="shrink-0" style={isActive ? { color } : undefined} />
-                            <span className="truncate">{sessionDisplayName(s)}</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onArchiveSession(s.id)}
-                            className="opacity-0 group-hover/session:opacity-100 text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)] shrink-0 p-0.5"
-                            title="Archive session"
-                          >
-                            <Archive size={12} />
-                          </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => onSelectSession(s.id)}
+                              onDoubleClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                startRename(s);
+                              }}
+                              title={`${sessionDisplayName(s)}\n${s.workspace_path}\nDouble-click to rename`}
+                              className="flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer"
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full shrink-0"
+                                style={{ backgroundColor: color, opacity: isActive ? 1 : 0.7 }}
+                              />
+                              <Terminal size={14} className="shrink-0" style={isActive ? { color } : undefined} />
+                              <span className="truncate">{sessionDisplayName(s)}</span>
+                            </button>
+                          )}
+                          {!isEditing && (
+                            <button
+                              type="button"
+                              onClick={() => onArchiveSession(s.id)}
+                              className="opacity-0 group-hover/session:opacity-100 text-[var(--color-text-dim)] hover:text-[var(--color-text-primary)] shrink-0 p-0.5"
+                              title="Archive session"
+                            >
+                              <Archive size={12} />
+                            </button>
+                          )}
                         </div>
                       );
                     })}

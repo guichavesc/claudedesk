@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
 import { Folder, FolderOpen, ChevronDown, ChevronRight, Clock } from 'lucide-react';
-import { Profile, PermissionMode, PERMISSION_MODES, DEFAULT_PERMISSION_MODE_KEY, LAST_MODEL_KEY } from '../types';
+import { Profile, Project, PermissionMode, PERMISSION_MODES, DEFAULT_PERMISSION_MODE_KEY, LAST_MODEL_KEY, providerDisplayName, profileProvider, UNCATEGORIZED_PROJECT_ID } from '../types';
 
 interface NewSessionModalProps {
   profiles: Profile[];
+  projects: Project[];
+  defaultProfileId?: string | null;
+  defaultProjectId?: string | null;
   onClose: () => void;
-  onSubmit: (data: { profileId: string; workspacePath: string; model: string; permissionMode: PermissionMode }) => void;
+  onSubmit: (data: { profileId: string; workspacePath: string; model: string; permissionMode: PermissionMode; projectId?: string | null }) => void;
 }
 
 const FALLBACK_MODELS = [
@@ -24,10 +27,11 @@ function splitPath(fullPath: string) {
   return { name, parent };
 }
 
-export function NewSessionModal({ profiles, onClose, onSubmit }: NewSessionModalProps) {
+export function NewSessionModal({ profiles, projects, defaultProfileId, defaultProjectId, onClose, onSubmit }: NewSessionModalProps) {
   const [workspacePath, setWorkspacePath] = useState('');
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([]);
-  const [profileId, setProfileId] = useState(profiles[0]?.id || '');
+  const [profileId, setProfileId] = useState(defaultProfileId || profiles[0]?.id || '');
+  const [projectId, setProjectId] = useState(defaultProjectId || UNCATEGORIZED_PROJECT_ID);
   const [model, setModel] = useState(localStorage.getItem(LAST_MODEL_KEY) || 'claude-sonnet-4-6');
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     (localStorage.getItem(DEFAULT_PERMISSION_MODE_KEY) as PermissionMode) || 'default'
@@ -71,7 +75,13 @@ export function NewSessionModal({ profiles, onClose, onSubmit }: NewSessionModal
     e.preventDefault();
     if (!workspacePath || !profileId || !model) return;
     localStorage.setItem(LAST_MODEL_KEY, model);
-    onSubmit({ profileId, workspacePath, model, permissionMode });
+    onSubmit({
+      profileId,
+      workspacePath,
+      model,
+      permissionMode,
+      projectId: !projectId || projectId === UNCATEGORIZED_PROJECT_ID ? null : projectId,
+    });
   };
 
   const handleSelectFolder = async () => {
@@ -84,11 +94,12 @@ export function NewSessionModal({ profiles, onClose, onSubmit }: NewSessionModal
   const otherRecents = recentWorkspaces.filter(p => p !== workspacePath);
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-[4px] z-[100] flex items-center justify-center">
-      <div className="w-[520px] bg-[var(--color-bg-elevated)] border border-[var(--color-border-default)] rounded-lg shadow-2xl p-6">
-        <h2 className="text-[18px] text-[var(--color-text-primary)] font-semibold mb-6">New Session</h2>
-
-        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+    <div className="cd-scrim" onClick={onClose}>
+      <div className="cd-dialog w-[520px]" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 pt-[18px] pb-3.5 border-b-2 border-[var(--strong)]">
+          <h2 className="text-[19px] font-extrabold tracking-tight">New session</h2>
+        </div>
+        <form onSubmit={handleSubmit} className="px-5 py-[18px] flex flex-col gap-5">
           {/* Workspace picker */}
           <div className="flex flex-col gap-2">
             <label className="font-ui text-[11px] text-[var(--color-text-dim)] uppercase tracking-wider font-semibold">Workspace</label>
@@ -159,6 +170,20 @@ export function NewSessionModal({ profiles, onClose, onSubmit }: NewSessionModal
           </div>
 
           <div className="flex flex-col gap-2">
+            <label className="cd-kicker">Project</label>
+            <select
+              value={projectId}
+              onChange={e => setProjectId(e.target.value)}
+              className="cd-select"
+            >
+              <option value={UNCATEGORIZED_PROJECT_ID}>Uncategorized</option>
+              {projects.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-2">
             <label className="font-ui text-[11px] text-[var(--color-text-dim)] uppercase tracking-wider font-semibold">Profile</label>
             <select 
               value={profileId} 
@@ -166,7 +191,11 @@ export function NewSessionModal({ profiles, onClose, onSubmit }: NewSessionModal
               className="bg-[var(--color-bg-base)] border border-[var(--color-border-subtle)] focus:border-[var(--color-accent)] outline-none px-3 py-2 rounded text-[13px] font-mono text-[var(--color-text-primary)] transition-colors"
             >
               <option value="" disabled>Select Profile</option>
-              {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              {profiles.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({providerDisplayName(profileProvider(p))})
+                </option>
+              ))}
             </select>
           </div>
 
@@ -193,7 +222,14 @@ export function NewSessionModal({ profiles, onClose, onSubmit }: NewSessionModal
                     Model
                     {selectedProfile && (
                       <span className="ml-2 text-[var(--color-text-dim)] font-normal normal-case">
-                        ({selectedProfile.auth_type === 'subscription' ? 'Subscription' : 'API Key'})
+                        ({providerDisplayName(profileProvider(selectedProfile))} ·{' '}
+                        {selectedProfile.auth_type === 'apikey'
+                          ? 'API Key'
+                          : selectedProfile.auth_type === 'google'
+                            ? 'Google'
+                            : selectedProfile.auth_type === 'chatgpt'
+                              ? 'ChatGPT'
+                              : 'Subscription'})
                       </span>
                     )}
                   </label>
@@ -237,16 +273,16 @@ export function NewSessionModal({ profiles, onClose, onSubmit }: NewSessionModal
             )}
           </div>
 
-          <div className="flex justify-end gap-3 mt-2">
-            <button type="button" onClick={onClose} className="px-4 py-2 rounded text-[13px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
+          <div className="flex justify-end gap-2.5 -mx-5 -mb-[18px] mt-2 px-5 py-3.5 border-t-2 border-[var(--strong)]">
+            <button type="button" onClick={onClose} className="cd-btn-ghost">
               Cancel
             </button>
             <button
               type="submit"
               disabled={!workspacePath || !profileId || !model}
-              className="px-4 py-2 rounded text-[13px] font-medium bg-[var(--color-accent)] text-black hover:brightness-110 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="cd-btn-primary"
             >
-              Start Session
+              Start session
             </button>
           </div>
         </form>

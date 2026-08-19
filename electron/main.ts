@@ -12,6 +12,8 @@ import { randomUUID } from 'crypto';
 import * as profileConfig from './profileConfig.js';
 import { augmentShellEnv, resolveClaudeBinary } from './claudeCli.js';
 import { readSessionTokenUsage } from './sessionUsage.js';
+import { getProvider, getProviderForProfile, isProviderBound, normalizeProvider, checkProviderCli, type ResumeMode } from './providers/index.js';
+import { buildHandoffContext } from './handoffContext.js';
 
 // Pin the product name + userData folder before app ready. Renaming package.json
 // previously moved Electron's data dir (agent-app -> ClaudeDesk) and looked like
@@ -112,6 +114,9 @@ interface ActiveCliSession {
   session: any;
   buffer: string;
   saveTimer: NodeJS.Timeout;
+  pendingInitialPrompt?: string;
+  limitNotified?: boolean;
+  providerId?: string;
 }
 
 // Each entry holds the live PTY process, the session row used to spawn it, and an
@@ -212,50 +217,22 @@ function getPty() {
   return ptyModule;
 }
 
-function buildClaudeEnv(profile: any): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = augmentShellEnv({ ...process.env, FORCE_COLOR: '1' });
-
-  // Every profile gets its own CLAUDE_CONFIG_DIR — not just subscription ones — so
-  // that MCP servers and plugins configured per-profile stay isolated regardless of
-  // auth method, instead of all API-key profiles sharing the default ~/.claude.
-  if (profile.claude_config_dir) {
-    const os = require('os');
-    const homedir = os.homedir();
-    env.CLAUDE_CONFIG_DIR = profile.claude_config_dir.replace('~', homedir);
+function decryptProfileApiKey(encrypted: string): string | null {
+  if (!encrypted || !safeStorage.isEncryptionAvailable()) return null;
+  try {
+    return safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+  } catch {
+    return null;
   }
-
-  if (profile.auth_type === 'apikey' && profile.keytar_service_key && safeStorage.isEncryptionAvailable()) {
-    env.ANTHROPIC_API_KEY = safeStorage.decryptString(Buffer.from(profile.keytar_service_key, 'base64'));
-  }
-
-  return env;
 }
 
-// `resume` restores Claude Code's own conversation memory (not just the visual
-// terminal dump). New sessions get a stable --session-id so later reopens can
-// --resume that exact conversation; if we only have a transcript snapshot from
-// before session-id binding existed, --continue picks up the latest chat in the
-// workspace as a best-effort fallback.
-function buildClaudeArgs(session: any, opts: { resume: boolean; continueRecent: boolean }): string[] {
-  const args = ['--model', session.model];
+function buildProviderEnv(profile: any): NodeJS.ProcessEnv {
+  return getProviderForProfile(profile).buildEnv(profile, decryptProfileApiKey);
+}
 
-  if (opts.resume) {
-    args.push('--resume', session.id);
-  } else if (opts.continueRecent) {
-    args.push('--continue');
-  } else {
-    args.push('--session-id', session.id);
-  }
-
-  const mode = session.permission_mode || 'default';
-
-  if (mode === 'bypassPermissions') {
-    args.push('--dangerously-skip-permissions');
-  } else if (mode && mode !== 'default') {
-    args.push('--permission-mode', mode);
-  }
-
-  return args;
+/** Claude-only helpers (plugins/MCP) still use the Claude adapter env. */
+function buildClaudeEnv(profile: any): NodeJS.ProcessEnv {
+  return getProvider('claude').buildEnv(profile, decryptProfileApiKey);
 }
 
 // Runs Claude Code once in non-interactive (-p) mode with no tool access, piping the
@@ -298,8 +275,13 @@ function runClaudePrint(prompt: string, model: string, cwd: string, env: NodeJS.
   });
 }
 
-// Spawns (or re-spawns) the interactive Claude Code PTY process for a session.
-function spawnClaudePty(sessionId: string, cols = 80, rows = 30): { success: boolean; message?: string } {
+// Spawns (or re-spawns) the interactive provider CLI PTY for a session.
+function spawnProviderPty(
+  sessionId: string,
+  cols = 80,
+  rows = 30,
+  opts?: { initialPrompt?: string },
+): { success: boolean; message?: string } {
   const db = getDb();
   const session: any = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
   if (!session) {
@@ -311,33 +293,56 @@ function spawnClaudePty(sessionId: string, cols = 80, rows = 30): { success: boo
     return { success: false, message: 'Profile not found' };
   }
 
-  // Seed from the last persisted transcript so a reopen doesn't start with an empty
-  // buffer and overwrite (wipe) the saved conversation a few seconds later.
+  const provider = getProviderForProfile(profile);
+  const providerId = normalizeProvider(session.provider || profile.provider);
+
   const snapshotRow: any = db.prepare('SELECT buffer FROM terminal_snapshots WHERE session_id = ?').get(sessionId);
   const priorBuffer: string = snapshotRow?.buffer || '';
   const hasPriorTranscript = priorBuffer.length > 0;
-  // Sessions created after we started passing --session-id can be resumed precisely;
-  // older ones only have a transcript dump, so fall back to --continue in that workspace.
-  const canResumeById = !!session.claude_bound;
+  const canResumeById = isProviderBound(session);
 
-  const env = buildClaudeEnv(profile);
-  const args = buildClaudeArgs(session, {
-    resume: hasPriorTranscript && canResumeById,
-    continueRecent: hasPriorTranscript && !canResumeById,
+  let resumeMode: ResumeMode = 'new';
+  if (hasPriorTranscript && canResumeById) resumeMode = 'resume';
+  else if (hasPriorTranscript && !canResumeById) resumeMode = 'continue';
+
+  const env = buildProviderEnv(profile);
+  const providerArgs = provider.buildSpawnArgs({
+    session: {
+      id: session.id,
+      model: session.model,
+      permission_mode: session.permission_mode,
+      provider_session_id: session.provider_session_id,
+    },
+    resumeMode,
   });
 
   const pty = getPty();
-  let claudeBinary: string;
+  let command: string;
+  let args: string[];
   try {
-    claudeBinary = resolveClaudeBinary();
+    const launch = provider.resolveLaunch();
+    command = launch.command;
+    args = [...launch.argsPrefix, ...providerArgs];
+    if (launch.viaNpx) {
+      console.log(`[PTY] ${provider.displayName} not on PATH — using npx fallback`);
+    }
   } catch (e: any) {
-    console.error('[PTY] Failed to resolve Claude binary:', e);
-    return { success: false, message: e?.message || 'Claude CLI not found in app bundle' };
+    console.error(`[PTY] Failed to resolve ${provider.displayName} binary:`, e);
+    return { success: false, message: e?.message || `${provider.displayName} CLI not found` };
   }
 
-  console.log('[PTY] Spawning claude for session', sessionId, '| binary:', claudeBinary, '| args:', args, '| cwd:', session.workspace_path);
+  console.log(
+    `[PTY] Spawning ${provider.id} for session`,
+    sessionId,
+    '| binary:',
+    command,
+    '| args:',
+    args,
+    '| cwd:',
+    session.workspace_path,
+  );
 
-  const ptyProcess = pty.spawn(claudeBinary, args, {
+  const ptyProcess = pty.spawn(command, args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -352,6 +357,27 @@ function spawnClaudePty(sessionId: string, cols = 80, rows = 30): { success: boo
       if (active.buffer.length > MAX_BUFFER_CHARS) {
         active.buffer = active.buffer.slice(active.buffer.length - MAX_BUFFER_CHARS);
       }
+
+      // Inject transfer handoff once the CLI has started printing (banner/prompt).
+      if (active.pendingInitialPrompt && active.buffer.length > 80) {
+        const prompt = active.pendingInitialPrompt;
+        active.pendingInitialPrompt = undefined;
+        setTimeout(() => {
+          try {
+            active.pty?.write(prompt.endsWith('\n') ? prompt : `${prompt}\n`);
+          } catch (e) {
+            console.error('[PTY] Failed to write handoff prompt', e);
+          }
+        }, 600);
+      }
+
+      if (!active.limitNotified) {
+        const adapter = getProvider(active.providerId || providerId);
+        if (adapter.rateLimitPatterns.some((re) => re.test(data))) {
+          active.limitNotified = true;
+          safeSend('session-limit-detected', sessionId);
+        }
+      }
     }
     safeSend('pty-output', sessionId, data);
   });
@@ -359,15 +385,12 @@ function spawnClaudePty(sessionId: string, cols = 80, rows = 30): { success: boo
   const spawnedAt = Date.now();
   ptyProcess.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
     console.log('[PTY] Session', sessionId, 'process exited with code', exitCode, 'signal', signal);
-    // A near-immediate exit means Claude never really started (bad binary, missing
-    // auth, killed by the OS, etc.) — surface it in the transcript itself so this is
-    // visible without opening DevTools, instead of just flipping the status dot red.
     if (Date.now() - spawnedAt < 4000) {
       const reason = signal ? `killed by signal ${signal}` : `exit code ${exitCode}`;
       const active = activeCliSessions[sessionId];
       const tail = (active?.buffer || '').split('\n').slice(-6).join('\n').trim();
       const note =
-        `\r\n\x1b[31m--- Claude process exited almost immediately (${reason}) ---\x1b[0m\r\n` +
+        `\r\n\x1b[31m--- ${provider.displayName} process exited almost immediately (${reason}) ---\x1b[0m\r\n` +
         (tail ? `\x1b[2m${tail}\x1b[0m\r\n` : '\x1b[2m(no output was produced before it exited)\x1b[0m\r\n');
       safeSend('pty-output', sessionId, note);
       if (active) active.buffer += note;
@@ -380,23 +403,41 @@ function spawnClaudePty(sessionId: string, cols = 80, rows = 30): { success: boo
     safeSend('pty-exit', sessionId, exitCode);
   });
 
-  // Periodically flush the in-memory buffer to disk so history survives an app restart
   const saveTimer = setInterval(() => persistBuffer(sessionId), 3000);
 
-  activeCliSessions[sessionId] = { pty: ptyProcess, session, buffer: priorBuffer, saveTimer };
+  activeCliSessions[sessionId] = {
+    pty: ptyProcess,
+    session,
+    buffer: priorBuffer,
+    saveTimer,
+    pendingInitialPrompt: opts?.initialPrompt,
+    providerId,
+  };
 
-  // Only mark bound when we actually passed --session-id (brand-new Claude conversation).
-  // --continue does not use our UUID, so claiming it is bound would break the next reopen.
-  if (!hasPriorTranscript && !session.claude_bound) {
+  // Claude: mark bound when we passed --session-id on a fresh spawn.
+  // Gemini/Codex: mark bound on first successful fresh spawn so reopen can resume.
+  if (resumeMode === 'new' && !isProviderBound(session)) {
     try {
-      db.prepare('UPDATE sessions SET claude_bound = 1 WHERE id = ?').run(sessionId);
-      session.claude_bound = 1;
+      db.prepare(`
+        UPDATE sessions
+        SET provider_bound = 1, claude_bound = CASE WHEN ? = 'claude' THEN 1 ELSE claude_bound END,
+            provider_session_id = COALESCE(provider_session_id, ?)
+        WHERE id = ?
+      `).run(providerId, session.id, sessionId);
+      session.provider_bound = 1;
+      if (providerId === 'claude') session.claude_bound = 1;
+      if (!session.provider_session_id) session.provider_session_id = session.id;
     } catch (e) {
-      console.error('[PTY] Failed to mark session as claude_bound', sessionId, e);
+      console.error('[PTY] Failed to mark session as provider_bound', sessionId, e);
     }
   }
 
   return { success: true };
+}
+
+/** @deprecated Use spawnProviderPty */
+function spawnClaudePty(sessionId: string, cols = 80, rows = 30) {
+  return spawnProviderPty(sessionId, cols, rows);
 }
 
 function killClaudePty(sessionId: string) {
@@ -510,24 +551,49 @@ app.on('before-quit', () => {
 function setupIpcHandlers() {
   ipcMain.handle('getProfiles', () => {
     const db = getDb();
-    return db.prepare('SELECT id, name, auth_type, created_at FROM profiles').all();
+    return db.prepare('SELECT id, name, auth_type, provider, created_at FROM profiles').all();
   });
 
   ipcMain.handle('createProfile', (_event, profileData) => {
     const db = getDb();
     const id = randomUUID();
     let encryptedKey = null;
-    
+    const provider = normalizeProvider(profileData.provider);
+    const adapter = getProvider(provider);
+
+    // Block Gemini/Codex profiles when the CLI isn't installed locally.
+    if (provider !== 'claude') {
+      const cli = checkProviderCli(provider);
+      if (!cli.available) {
+        return {
+          success: false,
+          message: cli.message || `${adapter.displayName} CLI not found`,
+          installHint: cli.installHint,
+        };
+      }
+    }
+
     if (profileData.apiKey && safeStorage.isEncryptionAvailable()) {
       encryptedKey = safeStorage.encryptString(profileData.apiKey).toString('base64');
     }
 
+    // Map UI auth labels: Claude subscription, Gemini google, Codex chatgpt → stored auth_type
+    let authType = profileData.authType || 'apikey';
+    if (provider === 'gemini' && authType === 'subscription') authType = 'google';
+    if (provider === 'codex' && (authType === 'subscription' || authType === 'google')) authType = 'chatgpt';
+
+    const configDir = adapter.defaultConfigDir(profileData.name);
+
     db.prepare(`
-      INSERT INTO profiles (id, name, auth_type, keytar_service_key, claude_config_dir)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, profileData.name, profileData.authType, encryptedKey, `~/.claude-profiles/${profileData.name}`);
-    
-    return id;
+      INSERT INTO profiles (id, name, auth_type, keytar_service_key, claude_config_dir, provider)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, profileData.name, authType, encryptedKey, configDir, provider);
+
+    return { success: true, id };
+  });
+
+  ipcMain.handle('checkProviderCli', (_event, provider) => {
+    return checkProviderCli(provider);
   });
 
   ipcMain.handle('deleteProfile', (_event, profileId) => {
@@ -679,9 +745,75 @@ function setupIpcHandlers() {
     const db = getDb();
     return db.prepare(`
       SELECT * FROM sessions
-      ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, started_at DESC
+      ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
+               COALESCE(sort_order, 0) ASC,
+               started_at DESC
     `).all();
   });
+
+  ipcMain.handle('getProjects', () => {
+    const db = getDb();
+    return db.prepare(`SELECT * FROM projects ORDER BY COALESCE(sort_order, 0) ASC, name COLLATE NOCASE ASC`).all();
+  });
+
+  ipcMain.handle('createProject', (_event, name) => {
+    const db = getDb();
+    try {
+      const cleaned = typeof name === 'string' ? name.trim().slice(0, 80) : '';
+      if (!cleaned) return { success: false, message: 'Project name is required' };
+      const id = randomUUID();
+      const maxOrder: any = db.prepare('SELECT COALESCE(MAX(sort_order), -1) as m FROM projects').get();
+      db.prepare(`INSERT INTO projects (id, name, sort_order) VALUES (?, ?, ?)`).run(id, cleaned, (maxOrder?.m ?? -1) + 1);
+      return { success: true, id };
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
+  });
+
+  ipcMain.handle('renameProject', (_event, projectId, name) => {
+    const db = getDb();
+    try {
+      const project: any = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+      if (!project) return { success: false, message: 'Project not found' };
+      const cleaned = typeof name === 'string' ? name.trim().slice(0, 80) : '';
+      if (!cleaned) return { success: false, message: 'Project name is required' };
+      db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(cleaned, projectId);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
+  });
+
+  ipcMain.handle('deleteProject', (_event, projectId) => {
+    const db = getDb();
+    try {
+      const project: any = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+      if (!project) return { success: false, message: 'Project not found' };
+      db.prepare('UPDATE sessions SET project_id = NULL WHERE project_id = ?').run(projectId);
+      db.prepare('DELETE FROM projects WHERE id = ?').run(projectId);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
+  });
+
+  ipcMain.handle('updateSessionProject', (_event, sessionId, projectId) => {
+    const db = getDb();
+    try {
+      const session: any = db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
+      if (!session) return { success: false, message: 'Session not found' };
+      if (projectId) {
+        const project: any = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+        if (!project) return { success: false, message: 'Project not found' };
+      }
+      db.prepare('UPDATE sessions SET project_id = ? WHERE id = ?').run(projectId || null, sessionId);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
+  });
+
+  ipcMain.handle('getRunningSessionIds', () => Object.keys(activeCliSessions));
 
   // Soft-close: keep history/snapshots so the session can be reopened later.
   ipcMain.handle('archiveSession', (_event, sessionId) => {
@@ -707,7 +839,10 @@ function setupIpcHandlers() {
       if (!session) return { success: false, message: 'Session not found' };
       if (session.status === 'active') return { success: true };
 
-      db.prepare(`UPDATE sessions SET status = 'active' WHERE id = ?`).run(sessionId);
+      // Park reopened sessions at the end of the tab strip.
+      const maxOrder: any = db.prepare('SELECT COALESCE(MAX(sort_order), -1) as m FROM sessions').get();
+      db.prepare(`UPDATE sessions SET status = 'active', sort_order = ? WHERE id = ?`)
+        .run((maxOrder?.m ?? -1) + 1, sessionId);
       return { success: true };
     } catch (error: any) {
       console.error('[Unarchive Session] Error:', error);
@@ -746,11 +881,65 @@ function setupIpcHandlers() {
       if (n < best) { color = c; best = n; }
     }
 
+    const maxOrder: any = db.prepare('SELECT COALESCE(MAX(sort_order), -1) as m FROM sessions').get();
+    const sortOrder = (maxOrder?.m ?? -1) + 1;
+
+    const profile: any = db.prepare('SELECT provider FROM profiles WHERE id = ?').get(sessionData.profileId);
+    const provider = normalizeProvider(profile?.provider);
+
     db.prepare(`
-      INSERT INTO sessions (id, profile_id, workspace_path, model, permission_mode, status, color)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, sessionData.profileId, sessionData.workspacePath, sessionData.model, sessionData.permissionMode || 'default', 'active', color);
+      INSERT INTO sessions (id, profile_id, workspace_path, model, permission_mode, status, color, sort_order, provider, parent_session_id, project_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      sessionData.profileId,
+      sessionData.workspacePath,
+      sessionData.model,
+      sessionData.permissionMode || 'default',
+      'active',
+      color,
+      sortOrder,
+      provider,
+      sessionData.parentSessionId || null,
+      sessionData.projectId || null,
+    );
     return id;
+  });
+
+  ipcMain.handle('updateSessionTitle', (_event, sessionId, title) => {
+    const db = getDb();
+    try {
+      const session: any = db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
+      if (!session) return { success: false, message: 'Session not found' };
+
+      const cleaned = typeof title === 'string' ? title.trim().slice(0, 120) : '';
+      db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(cleaned || null, sessionId);
+      safeSend('session-title-updated', sessionId, cleaned || '');
+      return { success: true, title: cleaned || null };
+    } catch (error: any) {
+      console.error('[Update Session Title] Error:', error);
+      return { success: false, message: error.message };
+    }
+  });
+
+  // Persist tab order after drag-and-drop. Expects the full ordered list of active session ids.
+  ipcMain.handle('reorderSessions', (_event, orderedIds) => {
+    const db = getDb();
+    try {
+      if (!Array.isArray(orderedIds) || orderedIds.some((id) => typeof id !== 'string')) {
+        return { success: false, message: 'Invalid session order' };
+      }
+
+      const update = db.prepare('UPDATE sessions SET sort_order = ? WHERE id = ?');
+      const tx = db.transaction((ids: string[]) => {
+        ids.forEach((id, index) => update.run(index, id));
+      });
+      tx(orderedIds);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Reorder Sessions] Error:', error);
+      return { success: false, message: error.message };
+    }
   });
 
   ipcMain.handle('updateSessionMode', (_event, sessionId, permissionMode) => {
@@ -782,7 +971,7 @@ function setupIpcHandlers() {
   // since the flag is only read at spawn time.
   ipcMain.handle('restartCliSession', (_event, sessionId, cols, rows) => {
     killClaudePty(sessionId);
-    return spawnClaudePty(sessionId, cols, rows);
+    return spawnProviderPty(sessionId, cols, rows);
   });
 
   ipcMain.handle('deleteSession', (_event, sessionId) => {
@@ -853,7 +1042,7 @@ function setupIpcHandlers() {
     if (activeCliSessions[sessionId]?.pty) {
       return { success: true, alreadyRunning: true };
     }
-    return spawnClaudePty(sessionId, cols, rows);
+    return spawnProviderPty(sessionId, cols, rows);
   });
 
   ipcMain.handle('sendCliInput', (_event, sessionId, data) => {
@@ -1304,6 +1493,11 @@ function setupIpcHandlers() {
         return { models: [], error: 'Profile not found' };
       }
 
+      const provider = getProviderForProfile(profile);
+      if (provider.id !== 'claude') {
+        return { models: provider.defaultModels() };
+      }
+
       console.log('[Get Models] Fetching available models for profile:', profile.name);
 
       // Try to get models from Anthropic API
@@ -1337,17 +1531,7 @@ function setupIpcHandlers() {
 
         if (!authHeader) {
           console.log('[Get Models] No auth available, returning default models');
-          // Return currently active models (as of July 2026)
-          resolve({
-            models: [
-              'claude-opus-4-7',
-              'claude-sonnet-4-6',
-              'claude-opus-4-6',
-              'claude-sonnet-4-5-20250929',
-              'claude-haiku-4-5-20251001',
-              'claude-opus-4-5-20251101'
-            ]
-          });
+          resolve({ models: provider.defaultModels() });
           return;
         }
 
@@ -1443,60 +1627,112 @@ function setupIpcHandlers() {
   });
 
   ipcMain.handle('verifyClaudeAuth', async (_event, profileName) => {
-    const os = require('os');
-    const fs = require('fs');
-    const homedir = os.homedir();
-    
+    return getProvider('claude').verifyAuth(profileName);
+  });
+
+  ipcMain.handle('verifyGeminiAuth', async (_event, profileName) => {
+    return getProvider('gemini').verifyAuth(profileName);
+  });
+
+  ipcMain.handle('verifyCodexAuth', async (_event, profileName) => {
+    return getProvider('codex').verifyAuth(profileName);
+  });
+
+  ipcMain.handle('getProviderAuthCommand', (_event, provider, profileName) => {
+    return getProvider(provider).authCommand(String(profileName || ''));
+  });
+
+  ipcMain.handle('transferSession', async (_event, payload) => {
+    const db = getDb();
     try {
-      const configDir = path.join(homedir, '.claude-profiles', profileName);
-      
-      // Check for both old and new credential file locations
-      const credPathNew = path.join(configDir, '.claude.json');
-      const credPathOld = path.join(configDir, '.credentials.json');
-      
-      console.log('[Verify Auth] Checking for credentials in:', configDir);
-      console.log('[Verify Auth] New format (.claude.json):', credPathNew);
-      console.log('[Verify Auth] Old format (.credentials.json):', credPathOld);
-      
-      if (fs.existsSync(credPathNew)) {
-        console.log('[Verify Auth] Found .claude.json');
-        try {
-          const content = JSON.parse(fs.readFileSync(credPathNew, 'utf8'));
-          if (content.auth || content.token || content.access_token) {
-            return { success: true, message: 'Authentication verified!' };
-          }
-        } catch (e) {
-          console.log('[Verify Auth] Error reading .claude.json:', e);
-        }
+      const sourceSessionId = payload?.sourceSessionId;
+      const targetProfileId = payload?.targetProfileId;
+      if (!sourceSessionId || !targetProfileId) {
+        return { success: false, message: 'sourceSessionId and targetProfileId are required' };
       }
-      
-      if (fs.existsSync(credPathOld)) {
-        console.log('[Verify Auth] Found .credentials.json');
-        return { success: true, message: 'Authentication verified!' };
+
+      const source: any = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sourceSessionId);
+      if (!source) return { success: false, message: 'Source session not found' };
+
+      const sourceProfile: any = db.prepare('SELECT * FROM profiles WHERE id = ?').get(source.profile_id);
+      const targetProfile: any = db.prepare('SELECT * FROM profiles WHERE id = ?').get(targetProfileId);
+      if (!targetProfile) return { success: false, message: 'Target profile not found' };
+      if (targetProfile.id === source.profile_id) {
+        return { success: false, message: 'Pick a different profile to continue with' };
       }
-      
-      // Check if directory exists but no auth files
-      if (fs.existsSync(configDir)) {
-        const files = fs.readdirSync(configDir);
-        console.log('[Verify Auth] Files in directory:', files);
-        
-        // If directory has files, authentication likely succeeded but stored in keychain
-        if (files.length > 0) {
-          return { 
-            success: true, 
-            message: 'Authentication verified! (Credentials stored in system keychain)' 
-          };
-        }
+
+      const sourceProvider = getProviderForProfile(sourceProfile);
+      const targetProvider = getProviderForProfile(targetProfile);
+
+      // Ensure target CLI is installed (or npx is available) before creating the session row.
+      try {
+        targetProvider.resolveLaunch();
+      } catch (e: any) {
+        return { success: false, message: e?.message || `${targetProvider.displayName} CLI not found` };
       }
-      
-      console.log('[Verify Auth] No credentials found');
-      return { 
-        success: false, 
-        message: 'No credentials found. Please make sure you completed the authentication in your browser.' 
-      };
+
+      const snapshotRow: any = db.prepare('SELECT buffer FROM terminal_snapshots WHERE session_id = ?').get(sourceSessionId);
+      const handoff = buildHandoffContext({
+        provider: sourceProvider.id,
+        configDir: sourceProfile?.claude_config_dir,
+        workspacePath: source.workspace_path,
+        sessionId: source.id,
+        terminalBuffer: snapshotRow?.buffer || activeCliSessions[sourceSessionId]?.buffer || '',
+        sourceLabel: `${sourceProvider.displayName} (${sourceProfile?.name || 'profile'})`,
+      });
+
+      killClaudePty(sourceSessionId);
+
+      const model = payload.model || targetProvider.defaultModels()[0] || source.model;
+      const newId = randomUUID();
+      const palette = ['#D4A843', '#4CAF7D', '#5B8DEF', '#B583D8', '#5BC6D8', '#E05C5C', '#E08A4D', '#3DB8A0'];
+      const existing: any[] = db.prepare('SELECT color FROM sessions').all();
+      const counts = new Map<string, number>(palette.map(c => [c, 0]));
+      for (const row of existing) {
+        if (row.color && counts.has(row.color)) counts.set(row.color, (counts.get(row.color) || 0) + 1);
+      }
+      let color = palette[0];
+      let best = Infinity;
+      for (const c of palette) {
+        const n = counts.get(c) || 0;
+        if (n < best) { color = c; best = n; }
+      }
+      const maxOrder: any = db.prepare('SELECT COALESCE(MAX(sort_order), -1) as m FROM sessions').get();
+      const sortOrder = (maxOrder?.m ?? -1) + 1;
+
+      db.prepare(`
+        INSERT INTO sessions (id, profile_id, workspace_path, model, permission_mode, status, color, sort_order, provider, parent_session_id, project_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        newId,
+        targetProfileId,
+        source.workspace_path,
+        model,
+        source.permission_mode || 'default',
+        'active',
+        color,
+        sortOrder,
+        normalizeProvider(targetProfile.provider),
+        sourceSessionId,
+        source.project_id || null,
+      );
+
+      // Soft-archive the source so the user doesn't keep burning quota on it.
+      try {
+        db.prepare(`UPDATE sessions SET status = 'archived' WHERE id = ?`).run(sourceSessionId);
+      } catch {
+        // non-fatal
+      }
+
+      const spawnResult = spawnProviderPty(newId, payload.cols || 80, payload.rows || 30, { initialPrompt: handoff });
+      if (!spawnResult.success) {
+        return { success: false, message: spawnResult.message || 'Failed to start transferred session', sessionId: newId };
+      }
+
+      return { success: true, sessionId: newId };
     } catch (error: any) {
-      console.error('[Verify Auth] Error:', error);
-      return { success: false, message: 'Error checking authentication' };
+      console.error('[transferSession]', error);
+      return { success: false, message: error.message || 'Transfer failed' };
     }
   });
 
